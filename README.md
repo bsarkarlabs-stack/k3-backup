@@ -1,3 +1,63 @@
 # k3-backup
 
-Backup repository for k3.
+Disaster-recovery documentation, backup strategy, and implementation tracking for the
+single-node K3s cluster **`k3-master`**.
+
+> **Private repository.** These documents contain server IP addresses, filesystem paths,
+> and infrastructure topology. They contain **no secrets, tokens, or key material** — and
+> must never be made to.
+
+## Goal
+
+> Fresh Ubuntu Server → Install compatible K3s → Restore backup → Restore workloads/data → Validate production.
+
+## Documents
+
+| # | Document | What it covers |
+|---|----------|----------------|
+| 01 | [Discovery Baseline](docs/01-discovery-baseline.md) | Verified state of `k3-master` — host, K3s, datastore, storage, workloads. The authoritative fact base. |
+| 02 | [Backup Strategy](docs/02-backup-strategy.md) | The nine backup components, three recovery tracks, S3 layout, retention, alerting. |
+| 03 | [Restore Runbook](docs/03-restore-runbook.md) | Ordered fresh-server → production recovery procedure. |
+| 04 | [Implementation TODO](docs/04-implementation-todo.md) | Phased build plan. Mirrored into GitHub Issues. |
+| 05 | [Gaps & Open Questions](docs/05-gaps-and-open-questions.md) | What discovery did not establish and must not be assumed. |
+
+## Current status
+
+| Area | Status |
+|------|--------|
+| Discovery baseline | ✅ Verified |
+| Backup strategy design | ✅ Documented |
+| Restore runbook | ✅ Documented (untested) |
+| S3 bucket + IAM | ⏳ Not created |
+| Cluster-state backup automation | ⏳ Not built |
+| Velero (K8s resources + PVC data) | ⏳ Not installed |
+| ArgoCD export automation | ⏳ Not built |
+| Retention lifecycle rules | ⏳ Not configured |
+| Failure alerting | ⏳ Not configured |
+| Restore drill | ⏳ Never performed |
+
+## Cluster at a glance
+
+```text
+Host          k3-master
+OS            Ubuntu 24.04.3 LTS (Noble), kernel 6.8.0-137-generic, x86_64
+K3s           v1.34.5+k3s1
+Topology      Single node, control-plane only, no HA
+Datastore     SQLite  (embedded etcd DISABLED, no external datastore)
+Storage       local-path provisioner → /var/lib/rancher/k3s/storage
+GitOps        ArgoCD (SBE / COW workloads)
+Monitoring    Prometheus, Loki, Grafana, Alertmanager, MinIO
+```
+
+## The single most important correction
+
+`/etc/rancher/k3s` is **configuration**, not the cluster's identity. Full recovery requires
+`/var/lib/rancher/k3s/server/` as one unit — including `tls/` and `cred/`, which the original
+discovery pass did not capture. See [Backup Strategy §2](docs/02-backup-strategy.md#2-the-correction-that-changes-the-whole-plan).
+
+## Working agreement
+
+- This documentation **must not live only on `k3-master`** — it would disappear in exactly
+  the scenario it exists to solve. This repository is the canonical copy.
+- Backup scripts, once written, live in `scripts/` in this repo and are deployed from here.
+- Every phase in the TODO has a corresponding GitHub Issue. Close the issue, tick the doc.
