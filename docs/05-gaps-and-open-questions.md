@@ -5,15 +5,15 @@ away**. Each gap has a GitHub Issue.
 
 | # | Gap | Severity | Blocks | Issue |
 |---|-----|----------|--------|-------|
-| 1 | Hosting provider unconfirmed | Medium | Snapshot fallback planning | [#8](../../issues/8) |
-| 2 | Ingress TLS certificate source unverified | **High** | Clean restore | [#9](../../issues/9) |
-| 3 | Node-level OS configuration not captured | **High** | Runbook step 2 | [#10](../../issues/10) |
-| 4 | OS package list not captured | Low | Fast parity on fresh server | [#11](../../issues/11) |
-| 5 | Secrets reach S3 unencrypted unless SSE-KMS is set | **Critical** | Phase 2 | [#12](../../issues/12) |
-| 6 | Single-region S3, no replication | Medium | Regional-outage DR | [#13](../../issues/13) |
-| 7 | Documentation as a single point of failure | Medium | — *(resolved by this repo)* | [#14](../../issues/14) |
-| 8 | No named owner for credential rotation | Medium | Ongoing security posture | [#15](../../issues/15) |
-| 9 | `server/tls/` and `server/cred/` contents never enumerated | **High** | Restore confidence | [#16](../../issues/16) |
+| 1 | Hosting provider unconfirmed | Medium | Snapshot fallback planning | [#13](../../issues/13) |
+| 2 | Ingress TLS certificate source unverified | **High** | Clean restore | [#4](../../issues/4) |
+| 3 | Node-level OS configuration not captured | **High** | Runbook step 2 | [#5](../../issues/5) |
+| 4 | OS package list not captured | Low | Fast parity on fresh server | [#6](../../issues/6) |
+| 5 | Secrets reach S3 unencrypted unless SSE-KMS is set | **Critical** | Phase 2 | [#14](../../issues/14) |
+| 6 | Single-region S3, no replication | Medium | Regional-outage DR | [#15](../../issues/15) |
+| 7 | Documentation as a single point of failure | Medium | — *(resolved by this repo)* | [#7](../../issues/7) |
+| 8 | No named owner for credential rotation | Medium | Ongoing security posture | [#16](../../issues/16) |
+| 9 | `server/tls/` and `server/cred/` contents never enumerated | **High** | Restore confidence | [#8](../../issues/8) |
 
 ---
 

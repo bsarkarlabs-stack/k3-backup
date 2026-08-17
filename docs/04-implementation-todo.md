@@ -7,13 +7,13 @@ Every phase has a corresponding GitHub Issue. Close the issue, tick the box here
 
 | Phase | Focus | Priority | Issue |
 |-------|-------|----------|-------|
-| 0 | Foundations | P0 — do first | [#1](../../issues/1) |
-| 1 | Node & cluster-state backup (Track A) | P0 | [#2](../../issues/2) |
-| 2 | Kubernetes-level backup (Track B) | P0 | [#3](../../issues/3) |
-| 3 | GitOps recoverability (Track C) | P1 | [#4](../../issues/4) |
-| 4 | Automation & retention | P1 | [#5](../../issues/5) |
-| 5 | Restore validation | P1 | [#6](../../issues/6) |
-| 6 | Close known gaps | P2 | [#7](../../issues/7) |
+| 0 | Foundations | P0 — do first | [#9](../../issues/9) |
+| 1 | Node & cluster-state backup (Track A) | P0 | [#10](../../issues/10) |
+| 2 | Kubernetes-level backup (Track B) | P0 | [#11](../../issues/11) |
+| 3 | GitOps recoverability (Track C) | P1 | [#1](../../issues/1) |
+| 4 | Automation & retention | P1 | [#2](../../issues/2) |
+| 5 | Restore validation | P1 | [#12](../../issues/12) |
+| 6 | Close known gaps | P2 | [#3](../../issues/3) |
 
 ---
 

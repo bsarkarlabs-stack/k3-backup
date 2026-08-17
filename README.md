@@ -36,6 +36,39 @@ single-node K3s cluster **`k3-master`**.
 | Failure alerting | ⏳ Not configured |
 | Restore drill | ⏳ Never performed |
 
+## Issue index
+
+Work is tracked as GitHub Issues. **Issue numbers are not sequential by phase** — they were
+created out of order.
+
+### Implementation phases
+
+| Phase | Issue | Priority |
+|-------|-------|----------|
+| 0 — Foundations: S3 bucket, IAM, sqlite3 | [#9](../../issues/9) | P0 |
+| 1 — Track A: node & cluster-state backup | [#10](../../issues/10) | P0 |
+| 2 — Track B: Velero resources + PVC data | [#11](../../issues/11) | P0 |
+| 3 — Track C: ArgoCD export & GitOps audit | [#1](../../issues/1) | P1 |
+| 4 — Retention rules & failure alerting | [#2](../../issues/2) | P1 |
+| 5 — Full restore drill | [#12](../../issues/12) | P1 |
+| 6 — Close known gaps | [#3](../../issues/3) | P2 |
+
+### Gaps
+
+| Gap | Issue | Priority |
+|-----|-------|----------|
+| Backups contain plaintext Secrets; bucket must be SSE-KMS encrypted | [#14](../../issues/14) | **P0** |
+| Ingress TLS certificate source unverified | [#4](../../issues/4) | P1 |
+| Node-level OS config not captured | [#5](../../issues/5) | P1 |
+| `server/tls/` and `server/cred/` never enumerated | [#8](../../issues/8) | P1 |
+| Hosting provider unconfirmed | [#13](../../issues/13) | P2 |
+| OS package list not captured | [#6](../../issues/6) | P2 |
+| Single-region S3, no replication | [#15](../../issues/15) | P2 |
+| Keep DR docs in Git, never only on the server | [#7](../../issues/7) | P2 |
+| No owner for credential rotation | [#16](../../issues/16) | P2 |
+
+**Start here:** [#9](../../issues/9) → [#10](../../issues/10) / [#11](../../issues/11) → [#1](../../issues/1) → [#2](../../issues/2) → [#12](../../issues/12)
+
 ## Cluster at a glance
 
 ```text
