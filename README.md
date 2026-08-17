@@ -20,6 +20,7 @@ single-node K3s cluster **`k3-master`**.
 | 03 | [Restore Runbook](docs/03-restore-runbook.md) | Ordered fresh-server → production recovery procedure. |
 | 04 | [Implementation TODO](docs/04-implementation-todo.md) | Phased build plan. Mirrored into GitHub Issues. |
 | 05 | [Gaps & Open Questions](docs/05-gaps-and-open-questions.md) | What discovery did not establish and must not be assumed. |
+| 06 | [Developer Access](docs/06-developer-access.md) | SSH deploy-key setup for cloning and pushing to this repo. |
 
 ## Current status
 

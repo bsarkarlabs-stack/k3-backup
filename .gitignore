@@ -1,0 +1,51 @@
+# ---------------------------------------------------------------------------
+# Key material — never commit any of this.
+# This repo documents disaster recovery for a cluster whose CA and server token
+# are P0-critical secrets. Nothing resembling key material belongs in git.
+# ---------------------------------------------------------------------------
+id_rsa
+id_ecdsa
+id_ed25519
+*_deploy
+*.pem
+*.key
+*.ppk
+*.p12
+*.pfx
+known_hosts
+authorized_keys
+
+# Public keys are safe, but keep them out by default so a stray private key
+# sitting next to one is more visible. Force-add deliberately if ever needed.
+*.pub
+
+# Kubernetes / cloud credentials
+kubeconfig
+*kubeconfig*
+k3s.yaml
+.aws/
+credentials
+*.token
+token
+
+# Backup artefacts — these belong in S3, not in git
+*.tar
+*.tar.gz
+*.tgz
+*.sql
+*.db
+*.db-wal
+*.db-shm
+*.sha256
+
+# Environment / local overrides
+.env
+.env.*
+*.local
+
+# Editor / OS noise
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
