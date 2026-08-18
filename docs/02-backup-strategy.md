@@ -1,65 +1,70 @@
 # 02 — Backup Strategy
 
-Built on the verified [Discovery Baseline](01-discovery-baseline.md).
+This builds on the facts we confirmed in [01 — Discovery Baseline](01-discovery-baseline.md).
 
-**Recovery goal:**
-> Fresh Ubuntu Server → Install compatible K3s → Restore backup → Restore workloads/data → Validate production.
+**What we're aiming for:**
+> If the server dies: get a fresh Ubuntu server → install the matching K3s version → restore our
+> backup → bring the apps and data back → double-check everything actually works.
 
 ---
 
-## 1. Scenario → recovery track
+## 1. What could go wrong, and what fixes it
 
-Every failure mode maps to one or more of the three recovery tracks defined in §4.
+Every bad scenario we can think of maps to one or more of the three "recovery tracks" explained
+in section 4 below.
 
-| Scenario | Track | What must exist |
+| If this happens... | We need... | What has to exist for it to work |
 |----------|-------|-----------------|
-| Complete server failure | A + B + C | Full stack: server identity, datastore, config, Velero backup, Git/ArgoCD state |
-| OS corruption | A | Fresh OS + restored `server/` directory, config, PVC data |
-| K3s corruption (binary or DB) | A | Reinstall matching K3s version + restore `db/`, `tls/`, `cred/` |
-| Accidental Kubernetes resource deletion | B or C | Velero object-level restore, or ArgoCD re-sync from Git |
-| Application deployment failure | C | Git revert + ArgoCD rollback |
-| Persistent-volume / data loss | B | Velero + node-agent snapshot of the affected PVC |
-| K3s datastore corruption | A | Consistent snapshot of `state.db` / `-wal` / `-shm` |
-| Certificate / configuration loss | A | Restore `tls/`, `cred/`, `/etc/rancher/k3s` |
-| ArgoCD configuration loss | C | `argocd admin import` from latest export |
-| Monitoring configuration loss | C / B | Redeploy from Git if IaC; else restore ConfigMaps via Velero |
-| Migration to fresh Ubuntu server | A + B + C | Full [restore runbook](03-restore-runbook.md), executed deliberately |
-| Disaster recovery to a new VM | A + B + C | Full restore runbook + DNS / network cutover |
+| The whole server fails | Tracks A + B + C | Everything: server identity, database, config, Velero backup, and our Git/ArgoCD setup |
+| The operating system gets corrupted | Track A | A fresh OS + our restored server folder, config, and app data |
+| K3s itself breaks (program or database) | Track A | Reinstall the matching K3s version + restore the database, certificates, and keys |
+| Someone accidentally deletes a Kubernetes resource | Track B or C | Restore that one object from Velero, or let ArgoCD re-create it from Git |
+| A bad app deployment goes out | Track C | Revert the Git change + roll back in ArgoCD |
+| A data volume gets lost or corrupted | Track B | Restore it from Velero's backup |
+| The K3s database gets corrupted | Track A | Restore a clean snapshot of the database files |
+| Certificates or config get lost | Track A | Restore the certificate folders + K3s config |
+| ArgoCD's own settings get lost | Track C | Re-import ArgoCD's latest exported settings |
+| Monitoring setup gets lost | Track C or B | Redeploy from Git if it's stored as code; otherwise restore from Velero |
+| We move to a brand new server | Tracks A + B + C | Follow the full [restore runbook](03-restore-runbook.md), carefully, step by step |
+| Full disaster recovery to a new machine | Tracks A + B + C | Same as above, plus pointing DNS/network at the new machine |
 
 ---
 
-## 2. The correction that changes the whole plan
+## 2. The one correction that changes everything
 
-> ### `/etc/rancher/k3s` is configuration. It is **not** the cluster's identity.
+> ### `/etc/rancher/k3s` is just a config file. It is **not** the cluster's real identity.
 
-The discovery baseline treated the SQLite datastore and the server token as separate line items.
-In practice, K3s keeps the entire cryptographic identity of the control plane inside
-`/var/lib/rancher/k3s/server/` — and **two of its subdirectories were never captured in
-discovery at all**:
+Early on, we treated the SQLite database and the server's secret token as two separate things to
+back up. In reality, K3s keeps the **entire identity** of the cluster — its certificates, its
+passwords, everything — inside one folder: `/var/lib/rancher/k3s/server/`. And two important
+sub-folders inside it were **never actually checked** during our first pass:
 
-| Directory | Contains | Consequence of loss |
+| Folder | What's inside | What happens if we lose it |
 |-----------|----------|---------------------|
-| `server/tls/` | Cluster CA + every serving / client certificate | A restored node cannot be trusted by existing kubeconfigs or rejoining agents without a full re-issue |
-| `server/cred/` | Node password / IPSec key used for node registration | Node identity must be rebuilt from scratch even if the datastore is intact |
+| `server/tls/` | The cluster's master certificate + every certificate used for secure connections | A restored server can't be trusted by anything that used to connect to it — every connection would need to be re-issued from scratch |
+| `server/cred/` | The password/key used when other machines join this cluster | We'd have to rebuild the server's identity from zero, even if the database itself is fine |
 
-**Treat `/var/lib/rancher/k3s/server/` as a single recovery unit** — `db/`, `tls/`, `cred/`,
-`token`, and `manifests/` together — not four separate backup line items that happen to live
-near each other.
+**Rule to remember:** treat `/var/lib/rancher/k3s/server/` as **one single thing to back up** —
+its `db/`, `tls/`, `cred/`, `token`, and `manifests/` folders travel together, always. Don't think
+of them as four separate backup jobs that just happen to be near each other.
 
-`/etc/rancher/k3s/` is real but secondary: 12 KB of pointers, not the thing being pointed to.
+`/etc/rancher/k3s/` is real and still needs backing up, but it's secondary — it's a tiny 12 KB
+file that just points to the real thing, not the real thing itself.
 
 ---
 
-## 3. Backup components
+## 3. The 9 things we back up
 
-Nine categories. Each is backed up differently and restored differently. **Priority reflects how
-bad it is to lose, not how large it is.**
+We split our backup into 9 categories. Each one is backed up differently and restored
+differently. **How urgent something is reflects how bad it would be to lose it — not how big the
+file is.**
 
-### Component 1 — K3s Datastore
-**Priority: P0 critical**
+### 1 — The K3s database
+**How urgent: Highest**
 
-The live cluster state. SQLite, actively using WAL — a raw `cp` while K3s runs can capture a
-torn write.
+This is the live, constantly-changing state of the whole cluster. It's a SQLite database that's
+actively being written to — so just copying the file while K3s is running risks grabbing it
+mid-write and ending up with a broken copy.
 
 ```text
 /var/lib/rancher/k3s/server/db/
@@ -70,42 +75,44 @@ torn write.
 
 | | |
 |---|---|
-| **Method** | SQLite online backup API (`.backup`) — **not** a raw file copy |
-| **Frequency** | Every 6 hours |
-| **Destination** | `s3://k3-master-dr/cluster-state/db/` |
+| **How we back it up** | Using SQLite's proper "online backup" feature — never a plain file copy |
+| **How often** | Every 6 hours |
+| **Where it goes** | `s3://k3-master-dr/cluster-state/db/` |
 
-> ⚠️ The `sqlite3` CLI is **not installed** on `k3-master`. Install it, or use Python 3's built-in
-> `sqlite3` module, which exposes the same backup API. Do not script around `file` output — script
-> around the actual backup call.
+> ⚠️ The `sqlite3` command-line tool isn't installed on `k3-master`. We can either install it, or
+> just use Python's built-in `sqlite3` module, which has the exact same safe backup feature
+> already built in. Either way — never write a script that just does a plain file copy.
 
 ---
 
-### Component 2 — Node Identity & Certificates
-**Priority: P0 critical / sensitive**
+### 2 — The cluster's identity & certificates
+**How urgent: Highest — and very sensitive**
 
-The part discovery under-weighted. Not configuration — cryptographic identity.
+This is the part our early planning underestimated. This isn't just "config" — it's the actual
+cryptographic identity of the cluster.
 
 ```text
 /var/lib/rancher/k3s/server/
-├── tls/     (cluster CA + serving certs)
-├── cred/    (node password / IPSec key)
+├── tls/     (master certificate + all connection certificates)
+├── cred/    (password/key used when other machines join)
 └── token
 ```
 
 | | |
 |---|---|
-| **Method** | Full `tar` of the directory, taken alongside the datastore snapshot |
-| **Frequency** | Daily, plus on any manual certificate rotation |
-| **Destination** | `s3://k3-master-dr/cluster-state/server-identity/` |
+| **How we back it up** | A complete archive (`tar`) of the whole folder, taken at the same time as the database backup |
+| **How often** | Every day, plus any time a certificate gets manually renewed |
+| **Where it goes** | `s3://k3-master-dr/cluster-state/server-identity/` |
 
-> 🔒 Must be encrypted at rest in S3, with access scoped to a single restore role.
+> 🔒 This must be encrypted while stored in S3, and only accessible to a very limited, dedicated
+> restore-only account.
 
 ---
 
-### Component 3 — K3s Configuration
-**Priority: P1**
+### 3 — K3s's own settings
+**How urgent: Medium**
 
-Small, but it is what tells the restored binary how to behave.
+Small, but it tells the K3s program how to behave when it starts up.
 
 ```text
 /etc/rancher/k3s/
@@ -116,20 +123,21 @@ Small, but it is what tells the restored binary how to behave.
 
 | | |
 |---|---|
-| **Method** | Plain `tar` (~12 KB) — cheap enough to version on every run |
-| **Frequency** | Daily, or on change if git-tracked |
-| **Destination** | `s3://k3-master-dr/config/` |
+| **How we back it up** | A plain archive (~12 KB) — cheap enough to save every single time |
+| **How often** | Every day, or whenever it changes |
+| **Where it goes** | `s3://k3-master-dr/config/` |
 
 ---
 
-### Component 4 — Static Manifests
-**Priority: P1**
+### 4 — K3s's built-in setup files
+**How urgent: Medium**
 
-Auto-deployed addons K3s installs on boot: CoreDNS, Traefik, metrics-server, CCM.
+These are extra add-ons that K3s automatically installs when it starts: CoreDNS (internal DNS),
+Traefik (routing traffic), metrics-server, and cloud-controller.
 
 ```text
 /var/lib/rancher/k3s/server/manifests/
-├── traefik-helmchartconfig.yaml  ← hand-modified, older timestamp
+├── traefik-helmchartconfig.yaml  ← someone edited this by hand, older timestamp
 ├── coredns.yaml
 ├── ccm.yaml
 ├── local-storage.yaml
@@ -138,257 +146,263 @@ Auto-deployed addons K3s installs on boot: CoreDNS, Traefik, metrics-server, CCM
 
 | | |
 |---|---|
-| **Method** | `tar` (~68 KB) |
-| **Frequency** | Daily, or on change |
-| **Destination** | `s3://k3-master-dr/manifests/` |
+| **How we back it up** | A plain archive (~68 KB) |
+| **How often** | Every day, or whenever it changes |
+| **Where it goes** | `s3://k3-master-dr/manifests/` |
 
-> `traefik-helmchartconfig.yaml` has an older timestamp than the rest — someone edited it by hand.
-> Worth a diff before every restore, not a blind overwrite.
+> `traefik-helmchartconfig.yaml` has an older "last modified" date than the rest — meaning
+> someone edited it by hand at some point. Worth comparing it carefully before ever overwriting
+> it during a restore, rather than just blindly copying over it.
 
 ---
 
-### Component 5 — Kubernetes Resource State
-**Priority: P0**
+### 5 — Everything running inside Kubernetes
+**How urgent: Highest**
 
-Every object the API server manages, across all namespaces. **Distinct from the SQLite file**
-because it restores at the object level, into any cluster, at any K3s version.
+Every single thing the Kubernetes API server manages, across every section (namespace) of the
+cluster. This is a different thing from the SQLite file above — this backs things up at the
+"object" level, meaning it can be restored into any cluster, even a different K3s version.
 
 ```text
 Deployments · Services · ConfigMaps · Secrets
-RBAC · CRDs · IngressRoutes
-(all namespaces, not just application namespaces)
+Permissions (RBAC) · Custom resource types · Routing rules
+(every namespace, not just the ones with our apps)
 ```
 
 | | |
 |---|---|
-| **Method** | Velero, S3 backend, cluster-wide schedule |
-| **Frequency** | Daily |
-| **Destination** | `s3://k3-master-dr/velero/` |
+| **How we back it up** | Velero (a Kubernetes backup tool), saving to S3 |
+| **How often** | Every day |
+| **Where it goes** | `s3://k3-master-dr/velero/` |
 
-> This is what makes a version-migrated or genuinely fresh cluster recoverable. **The SQLite file
-> only helps if you rebuild the same node.** Migration and DR-to-new-VM both depend on this
-> component, not on component 1.
+> This is the piece that makes it possible to move to a different server or a different K3s
+> version. **The SQLite database backup only helps if we rebuild the exact same server.** Moving
+> to a new machine, or recovering onto a totally fresh machine, depends on this Velero backup —
+> not on the database backup.
 
 ---
 
-### Component 6 — Persistent Application Data
-**Priority: P1**
+### 6 — App data stored on disk
+**How urgent: Medium**
 
-The six monitoring-stack PVCs. Operationally valuable, but it is history — not primary business
-data.
+This covers the six monitoring data volumes. Useful and worth keeping, but it's historical data
+(old metrics/logs) — not something our business directly depends on minute-to-minute.
 
 ```text
 /var/lib/rancher/k3s/storage/
-Prometheus ~5.5 GB · Loki MinIO ~2.2 GB
+Prometheus ~5.5 GB · Loki/MinIO ~2.2 GB
 Grafana ~50 MB · Loki Write/Backend · Alertmanager
 ```
 
 | | |
 |---|---|
-| **Method** | Velero + node-agent (restic / kopia filesystem backup) |
-| **Frequency** | Daily, alongside the resource backup |
-| **Destination** | `s3://k3-master-dr/velero/` (bundled) |
+| **How we back it up** | Velero, using its "node-agent" feature to copy files off disk |
+| **How often** | Every day, at the same time as item 5 |
+| **Where it goes** | `s3://k3-master-dr/velero/` (bundled together with item 5) |
 
-> `local-path` has no CSI snapshot capability. Filesystem backup via Velero's node-agent is the
-> only supported path. See §6.
+> The type of storage we use (`local-path`) doesn't support the fancy "snapshot" feature some
+> cloud disks have. Copying the actual files through Velero's node-agent is the only reliable way
+> to back this up. See section 6 below for why a plain file copy doesn't work here.
 
 ---
 
-### Component 7 — Secrets & Registry Credentials
-**Priority: P0 sensitive**
+### 7 — Secrets & login credentials
+**How urgent: Highest — and very sensitive**
 
-`imagePullSecrets`, ingress TLS secrets, ArgoCD repository credentials, application secrets.
+Things like image-pull credentials, HTTPS certificates stored as Kubernetes Secrets, ArgoCD's
+Git login details, and any app-specific secrets.
 
 ```text
-kind: Secret  (across all namespaces)
-— captured automatically inside the Velero
-  resource backup, not as a separate job
+kind: Secret  (across every namespace)
+— this gets captured automatically as part of the
+  Velero backup, not as a separate job
 ```
 
 | | |
 |---|---|
-| **Method** | Covered by Velero — but the bucket **must** be SSE-KMS encrypted |
-| **Frequency** | Daily (with Velero) |
+| **How we back it up** | Automatically included in the Velero backup — but the S3 bucket **must** be encrypted |
+| **How often** | Every day, together with item 5 |
 
-> 🔒 A Velero backup is, among other things, a bundle of plaintext Kubernetes Secrets. Bucket
-> encryption and tight IAM are load-bearing here, not optional hardening.
+> 🔒 A Velero backup literally contains real, readable secret values. Encrypting the bucket and
+> locking down who can access it isn't a nice-to-have here — it's required.
 
 ---
 
-### Component 8 — Container Registry Dependency
-**Priority: P1**
+### 8 — Which container images we depend on
+**How urgent: Medium**
 
-Nothing above backs up the images themselves. **A perfect resource restore still fails if
-upstream images cannot be pulled.**
+None of the items above back up the actual container images. **Even a perfect backup of
+everything else is useless if we can't re-download the images afterward.**
 
 ```text
-image manifest: every unique image reference
-in use, regenerated on each run
-+ registries.yaml (mirror configuration)
+A list of every unique image currently in use,
+regenerated fresh every time we run a backup
++ registries.yaml (where to download images from)
 ```
 
 | | |
 |---|---|
-| **Method** | Generate image list from live pods each run; consider mirroring critical images to a private registry |
-| **Frequency** | Every backup run — cheap to regenerate |
-| **Destination** | `s3://k3-master-dr/image-manifest/` |
+| **How we back it up** | Generate a fresh list from whatever's actually running, every time |
+| **How often** | Every single backup run — it's cheap to redo |
+| **Where it goes** | `s3://k3-master-dr/image-manifest/` |
 
 ---
 
-### Component 9 — Git / ArgoCD Recoverability
-**Priority: P0 for (b), P2 for (a)**
+### 9 — Git and ArgoCD recoverability
+**How urgent: Highest for part (b) below, Low for part (a)**
 
-Two different things:
+This splits into two very different things:
 
-**(a) The Git repositories** — already durable via GitHub. No additional backup required, but the
-remotes and credentials must be documented.
+**(a) The actual Git repositories** — these already live safely on GitHub. Nothing extra needed
+here, other than making sure we've written down which Git repos and login credentials ArgoCD
+depends on.
 
-**(b) ArgoCD's own state that Git does not hold:**
+**(b) ArgoCD's own internal settings, which Git does *not* have a copy of:**
 
 ```text
-argocd-cm · argocd-rbac-cm · argocd-secret
-Applications / AppProjects created outside
-the app-of-apps pattern
+Its config + permissions + internal secrets
+Any Apps or Projects that were created by hand,
+outside of our normal "one Git repo defines everything" setup
 ```
 
 | | |
 |---|---|
-| **Method** | `argocd admin export` → single importable YAML |
-| **Frequency** | Daily |
-| **Destination** | `s3://k3-master-dr/argocd-export/` |
+| **How we back it up** | Run `argocd admin export`, which produces one file we can re-import later |
+| **How often** | Every day |
+| **Where it goes** | `s3://k3-master-dr/argocd-export/` |
 
-> Monitoring recoverability splits the same way: configuration-as-code collapses into this
-> component; historical metrics and logs are component 6.
+> Our monitoring setup splits the same way: if it's defined as code in Git, that recovers through
+> this item. The actual historical metrics/logs data is a separate concern — that's item 6 above.
 
 ---
 
-## 4. Three recovery tracks
+## 4. Three separate ways we can recover
 
-Every component belongs to exactly one track. **Recovery never depends on all three succeeding at
-once** — that is the point of separating them.
+Every one of the 9 items above belongs to exactly one of these three groups, which we call
+"tracks." **We never need all three to succeed at once — that's the whole point of keeping them
+separate.**
 
-### Track A — Node-level (files on disk)
-- Server identity: `tls/`, `cred/`, `token`
-- SQLite datastore
-- K3s configuration + static manifests
-- Node OS configuration *(see [Gaps](05-gaps-and-open-questions.md))*
+### Track A — The server's own files
+- Its identity: `tls/`, `cred/`, `token`
+- The SQLite database
+- K3s's config + built-in setup files
+- The server's OS-level settings *(see [Gaps](05-gaps-and-open-questions.md) — this part isn't fully covered yet)*
 
-### Track B — Kubernetes-level (Velero, S3 backend)
-- All resources, all namespaces
-- Secrets & RBAC
-- PVC data via node-agent
-- **Works into a fresh cluster or a different K3s version**
+### Track B — What's running inside Kubernetes (via Velero, saved to S3)
+- Every object, in every namespace
+- Secrets and permissions
+- App data on disk
+- **Works even if we're restoring into a brand new cluster or a different K3s version**
 
-### Track C — GitOps-level (Git + ArgoCD)
-- SBE / COW application manifests (Git, already durable)
-- `argocd admin export`
-- Fastest path for application-only recovery
+### Track C — Git + ArgoCD
+- Our SBE / COW app definitions (already safe in Git)
+- ArgoCD's exported settings
+- The fastest way to recover if it's *only* our apps that broke, nothing else
 
 ```text
     Track A              Track B              Track C
-  Node files          Velero / S3          Git + ArgoCD
+  Server files        Velero / S3          Git + ArgoCD
       │                    │                    │
       └────────────────────┼────────────────────┘
                            ▼
-                 k3-master — recovered
+                 k3-master — back up and running
 ```
 
 ---
 
-## 5. S3 storage design
+## 5. How we organize things inside S3
 
-One bucket, prefixed by track and layer. **Lifecycle rules do the retention work** so nothing
-depends on a script remembering to delete old backups.
-
-| Setting | Value | Why |
-|---------|-------|-----|
-| Bucket | `k3-master-dr` | Globally unique names — add a suffix if taken |
-| Region | `ap-south-1` (Mumbai) by default | Any region works — ~320 MB/day makes latency a non-factor. Choose on cost and where the team sits. **Cannot be changed after creation.** See [07 Stage C.0](07-phase-0-1-execution.md#c0--pick-a-region-one-line-any-of-these-work). |
-| Encryption | SSE-KMS, customer-managed key | [Gap 5](05-gaps-and-open-questions.md#5-secrets-reach-s3-unencrypted-unless-sse-kms-is-configured) — load-bearing, not hardening |
-| Versioning | Enabled | Protects against bad overwrites and a compromised write credential |
-
-Created and verified in [07 — Phase 0 & 1 Execution, Stage C](07-phase-0-1-execution.md#stage-c--aws-foundations-local).
+One S3 bucket, with folders (called "prefixes") separating each track and layer. **We rely on S3's
+automatic lifecycle rules to delete old backups on schedule**, so nothing depends on a script
+remembering to clean up after itself.
 
 ```text
 s3://k3-master-dr/
 ├── cluster-state/
-│   ├── db/                  SQLite snapshots, every 6h
+│   ├── db/                  SQLite database snapshots, every 6 hours
 │   └── server-identity/     tls/, cred/, token — encrypted
-├── config/                  /etc/rancher/k3s
-├── manifests/               static manifests
-├── velero/                  Velero-managed: resources + PVC data
-├── argocd-export/           argocd admin export dumps
-├── image-manifest/          image inventory, per run
-└── node-config/             netplan, ufw, ssh, systemd overrides
+├── config/                  Copy of /etc/rancher/k3s
+├── manifests/               K3s's built-in setup files
+├── velero/                  Everything Velero manages: apps + app data
+├── argocd-export/           ArgoCD's exported settings
+├── image-manifest/          List of container images in use, saved every run
+└── node-config/             Network settings, firewall rules, SSH, etc.
 ```
 
-### Retention matrix
+### How long we keep each type of backup
 
-| Layer | Frequency | Retention | Tool |
+| What | How often we back it up | How long we keep copies | Tool used |
 |-------|-----------|-----------|------|
-| Datastore + server identity | every 6 h | 7 daily + 4 weekly + 3 monthly | custom script |
-| Config + manifests | daily | 14 daily | custom script |
-| Kubernetes resources + PVC data | daily | 14 daily + 8 weekly | Velero |
-| ArgoCD export | daily | 14 daily | `argocd admin export` |
-| Image manifest | per run | 30 days | custom script |
-| Node config | weekly / on change | 4 copies | custom script |
+| Database + server identity | Every 6 hours | 7 daily + 4 weekly + 3 monthly copies | Our own script |
+| Config + built-in setup files | Every day | 14 days | Our own script |
+| Kubernetes objects + app data | Every day | 14 daily + 8 weekly | Velero |
+| ArgoCD export | Every day | 14 days | `argocd admin export` |
+| Container image list | Every run | 30 days | Our own script |
+| Server OS settings | Weekly, or when changed | Last 4 copies | Our own script |
 
-### Bucket hygiene — not an afterthought
+### Keeping the bucket itself secure — not optional, not an afterthought
 
-- **Least-privilege IAM.** A dedicated user or role scoped only to this bucket:
-  `PutObject` / `GetObject` / `ListBucket` on `arn:aws:s3:::k3-master-dr/*`, nothing broader.
-- **Block all public access.**
-- **Default encryption via SSE-KMS** with a customer-managed key. Velero backups contain
-  plaintext Secrets — this is not optional.
-- **Versioning on, unconditionally.** Cheapest protection against a bad overwrite or a
-  compromised write credential.
-- **Separate credentials.** The write credential lives on the server and is used by the systemd
-  timers. The read credential is used only during a restore and is held offline.
-
----
-
-## 6. The persistent-volume gotcha
-
-> ### `tar`-and-copy does **not** restore a `local-path` PVC.
-
-`local-path-provisioner` names each volume's directory after the **PV's generated name**. A fresh
-PVC created during restore gets a new PV, a new name, and therefore a new directory — a raw `tar`
-of `/var/lib/rancher/k3s/storage/` has nowhere matching to land.
-
-Two ways this actually works:
-
-1. **Velero's node-agent** restores the filesystem data *after* the new PVC/PV is bound; it
-   tracks the mapping for you. ← supported path
-2. Pre-create PVs with pinned names before the PVC is recreated. ← fragile, manual
-
-This is why component 6 routes through Velero rather than a cron-and-`tar` script like
-components 1–4.
-
-Related: the `local-path` StorageClass reclaim policy is **`Delete`**. PVC deletion destroys the
-underlying data immediately — there is no orphaned-PV grace period to recover from.
+- **Least access possible.** A dedicated login that can *only* touch this one bucket, and can
+  *only* add or read files, list the bucket — nothing more, nothing broader.
+- **Block all public access.** No one outside our team should ever be able to reach this bucket.
+- **Turn on default encryption** using our own dedicated encryption key (not Amazon's shared
+  default one). Since a Velero backup contains real secret values, this really isn't optional.
+- **Turn on versioning, no matter what.** This is the cheapest possible protection against
+  accidentally overwriting a good backup with a bad one, or against a compromised login being used
+  to tamper with backups.
+- **Use two separate logins.** One login (that can only *write*) lives on the server and is used
+  by the automatic backup schedule. A completely different login (that can only *read*) is used
+  only during an actual restore, and is kept somewhere safe offline — never on the server itself.
 
 ---
 
-## 7. Alerting & verification
+## 6. The tricky part about app data on disk
 
-**A backup nobody watches is a backup that fails silently.** The monitoring stack already exists
-— reuse it instead of adding a new tool.
+> ### Just copying files does **not** properly restore app data volumes.
 
-| Control | Detail |
+The way our storage system (`local-path-provisioner`) works, it names each data folder after a
+randomly generated ID. If we create a fresh data volume during a restore, it gets a **brand new**
+random ID and folder name — so a plain copy-and-paste of the old
+`/var/lib/rancher/k3s/storage/` folder has nowhere matching to land in.
+
+There are two ways to actually make this work:
+
+1. **Use Velero's node-agent feature** — it restores the actual files *after* the new data volume
+   is created, and it automatically tracks which files go where. ← This is the approach we use.
+2. Manually pre-create data volumes with the exact same names as before, ahead of time. ← Works,
+   but fragile and manual — easy to get wrong.
+
+This is exactly why app data backup (item 6 above) goes through Velero instead of a simple
+copy-and-schedule script like items 1–4 do.
+
+One more thing worth knowing: if a data volume gets deleted, its underlying files are deleted
+**immediately** — there's no grace period where the old data just sits around waiting to be
+reconnected.
+
+---
+
+## 7. Making sure backups actually work, and knowing if one fails
+
+**A backup that nobody's watching is a backup that can quietly fail for months without anyone
+noticing.** We already have a monitoring stack (Prometheus/Grafana/Alertmanager) — we should
+reuse it instead of adding some brand new tool just for this.
+
+| What we do | Why |
 |---------|--------|
-| **Checksum every archive** | SHA-256 each tar/snapshot before upload; store the checksum alongside it. A corrupt upload should fail loud, not surface during an actual restore. |
-| **Feed Alertmanager** | Push a `backup_last_success_timestamp` metric from each job. Alert if any track's timestamp is stale by more than 1.5× its own frequency. |
-| **Quarterly restore drill** | Run the full [runbook](03-restore-runbook.md) against a throwaway VM every quarter. *A backup that has never been restored is a hypothesis, not a plan.* |
-| **Track RTO, not just success/fail** | Time each drill end-to-end. If restore takes longer than the business can tolerate being down, that is a finding — not a footnote. |
+| **Checksum every backup file** | Before uploading, calculate a SHA-256 fingerprint for every archive/snapshot and save it alongside the file. That way a corrupted upload fails loudly right away — not silently, only discovered during an actual emergency restore. |
+| **Feed our monitoring system** | Each backup job reports a timestamp of "when did I last succeed." We get alerted if any track's timestamp is older than 1.5× how often it's supposed to run. |
+| **Test a full restore every 3 months** | Actually run through the entire [restore runbook](03-restore-runbook.md) on a throwaway test server. *A backup that's never actually been restored is just a hope, not a real plan.* |
+| **Track how long a restore takes, not just pass/fail** | Time every practice restore from start to finish. If it takes longer than the business can tolerate being down, that's a real problem we need to fix — not just a footnote. |
 
 ---
 
-## 8. What is explicitly **not** backed up
+## 8. What we deliberately do **not** back up
 
-| Path | Size | Why excluded |
+| Folder | Size | Why we skip it |
 |------|------|--------------|
-| `/var/lib/rancher/k3s/agent/` | ~43 GB | Container images and runtime cache. Fully reproducible from registries — see component 8 for the manifest that makes that possible. |
-| `/var/lib/rancher/k3s/data/` | ~233 MB | Extracted K3s binaries. Recreated by reinstalling the matching K3s version. |
+| `/var/lib/rancher/k3s/agent/` | ~43 GB | Just downloaded container images and cache. Fully replaceable by re-downloading from our registries — see item 8 above for the list that makes that possible. |
+| `/var/lib/rancher/k3s/data/` | ~233 MB | K3s's own extracted program files. Recreated automatically just by reinstalling the matching K3s version. |
 
-Backing these up would multiply storage cost and backup duration by roughly 500× for no recovery
-benefit. This exclusion is a deliberate decision, not an oversight.
+Backing these up would multiply how much storage we use and how long backups take by roughly
+500×, for zero actual benefit during a restore. Skipping them is a deliberate choice, not
+something we overlooked.

@@ -1,138 +1,149 @@
 # 04 — Implementation TODO
 
-Nothing below is built yet. **This is the order to build it in** — each phase produces something
-the next phase depends on.
+Nothing below has been built yet. **This is the order we plan to build it in** — each phase
+produces something the next phase needs.
 
-Every phase has a corresponding GitHub Issue. Close the issue, tick the box here.
+Every phase has a matching GitHub Issue. When work is done: close the issue, and tick the box
+here.
 
-| Phase | Focus | Priority | Issue |
+| Phase | What it's about | How urgent | Issue |
 |-------|-------|----------|-------|
-| 0 | Foundations | P0 — do first | [#9](../../issues/9) |
-| 1 | Node & cluster-state backup (Track A) | P0 | [#10](../../issues/10) |
-| 2 | Kubernetes-level backup (Track B) | P0 | [#11](../../issues/11) |
-| 3 | GitOps recoverability (Track C) | P1 | [#1](../../issues/1) |
-| 4 | Automation & retention | P1 | [#2](../../issues/2) |
-| 5 | Restore validation | P1 | [#12](../../issues/12) |
-| 6 | Close known gaps | P2 | [#3](../../issues/3) |
+| 0 | Getting the basics ready | Do this first | [#9](../../issues/9) |
+| 1 | Back up the server itself | Highest | [#10](../../issues/10) |
+| 2 | Back up what's running inside Kubernetes | Highest | [#11](../../issues/11) |
+| 3 | Make sure ArgoCD/Git are recoverable | Medium | [#1](../../issues/1) |
+| 4 | Auto-cleanup + alerting | Medium | [#2](../../issues/2) |
+| 5 | Actually test a restore | Medium | [#12](../../issues/12) |
+| 6 | Close remaining unknowns | Low | [#3](../../issues/3) |
 
 ---
 
-## Phase 0 — Foundations
-**Priority: P0 — do first. Every later phase depends on this.**
+## Phase 0 — Getting the basics ready
+**How urgent: Do this first. Every later phase depends on this being done.**
 
-- [ ] Confirm hosting provider, and whether a hypervisor-level VM snapshot is available as a
-      belt-and-suspenders option
-- [ ] Install `sqlite3` CLI on `k3-master` (or confirm `python3` with the `sqlite3` module is
-      available for the `.backup` API)
-- [ ] Create the S3 bucket `k3-master-dr` — versioning enabled, SSE-KMS default encryption with a
-      customer-managed key, all public access blocked
-- [ ] Create a least-privilege IAM user or role scoped to that bucket only
-      (`PutObject` / `GetObject` / `ListBucket` on `arn:aws:s3:::k3-master-dr/*`)
-- [ ] Create a **separate read-only credential** for restores and store it offline — not on
+- [ ] Confirm who hosts this server, and whether they offer a snapshot feature we could use as
+      an extra safety net
+- [ ] Install the `sqlite3` command-line tool on `k3-master` (or confirm Python's built-in
+      `sqlite3` module works instead — either gives us the safe backup feature we need)
+- [ ] Create the S3 bucket `k3-master-dr` — with file-history (versioning) turned on, our own
+      dedicated encryption key set as the default, and all public access blocked
+- [ ] Create a dedicated login that can *only* touch this one bucket
+      (and can only add/read/list files — nothing more)
+- [ ] Create a **separate, read-only login** just for restores, and store it somewhere safe
+      offline — not on `k3-master`
+- [ ] Test that `k3-master` can actually reach S3 over the internet, using a throwaway test file
+
+---
+
+## Phase 1 — Back up the server itself
+**How urgent: Highest**
+
+Covers [items 1–4 and 8](02-backup-strategy.md#3-backup-components) from the backup strategy.
+
+- [ ] Write a script that makes a **safe, consistent** backup of the SQLite database using its
+      proper backup feature — never a plain file copy of a live database
+- [ ] In the same script, also archive the `server/tls`, `server/cred`, `server/token`, and
+      `server/manifests` folders, at the same time as the database backup
+- [ ] Also archive `/etc/rancher/k3s` and `/etc/systemd/system/k3s.service`
+- [ ] Save the server's OS-level settings into a `node-config/` backup: network settings,
+      firewall rules, SSH keys and allowed logins, timezone/clock settings, and the list of
+      installed system packages
+- [ ] Generate a list of container images currently running, as part of the same backup run
+- [ ] Calculate a fingerprint (SHA-256 checksum) for every file **before** uploading it, and save
+      that fingerprint alongside the file
+- [ ] Upload everything to the matching S3 folders
+- [ ] Schedule this to run automatically using a **systemd timer** (matching how the server
+      already schedules its one existing routine job) — not a cron job, since this server
+      doesn't use cron today and we want to keep it that way
+- [ ] Confirm one full run actually produces the files we expect, in every folder
+- [ ] Save this script into `scripts/` in this repo
+
+---
+
+## Phase 2 — Back up what's running inside Kubernetes
+**How urgent: Highest**
+
+Covers [items 5, 6, and 7](02-backup-strategy.md#3-backup-components) from the backup strategy.
+This is the piece that makes it possible to move to a new server or a new K3s version at all.
+
+- [ ] Install Velero plus its AWS S3 plugin, pointed at the same bucket, saving under the
+      `velero/` folder
+- [ ] Turn on the **node-agent** feature (needed because our storage type doesn't support
+      snapshot-based backups)
+- [ ] Set up a daily schedule that covers **every** namespace, not just the ones with our apps
+- [ ] Double-check that our six monitoring data volumes are actually included in the backup
+- [ ] After a backup completes, actually check what's inside it — **don't just trust a green
+      checkmark**
+- [ ] Do one small test restore of something unimportant, just to prove the whole process works
+
+---
+
+## Phase 3 — Make sure ArgoCD/Git are recoverable
+**How urgent: Medium**
+
+Covers [item 9](02-backup-strategy.md#component-9--git--argocd-recoverability) from the backup
+strategy.
+
+- [ ] Go through every ArgoCD App and confirm each one is properly defined in our Git setup, not
+      created by hand outside of it. Anything created by hand can't be recovered from Git alone.
+- [ ] Schedule a daily `argocd admin export`, saved to the `argocd-export/` folder
+- [ ] Write down exactly which Git repos and login credentials ArgoCD depends on
+- [ ] Confirm whether our monitoring setup (Prometheus/Loki/Grafana) is defined as code in Git.
+      If it is, its *configuration* is already covered by this phase, and only its *historical
+      data* still needs Phase 2's backup.
+
+---
+
+## Phase 4 — Auto-cleanup and alerting
+**How urgent: Medium**
+
+- [ ] Set up S3's automatic cleanup rules, following the
+      [table in the backup strategy](02-backup-strategy.md#retention-matrix)
+- [ ] Have each backup job report a "last successful run" timestamp
+- [ ] Set up an alert using our **existing** monitoring/alerting tool — if any backup's timestamp
+      gets older than 1.5× how often it's supposed to run. No new alerting tool needed.
+- [ ] Actually test that the alert fires, by deliberately making one backup job fail on purpose
+- [ ] Let all three backup tracks run on their own, untouched, for **one full week** before we
+      start relying on them
+
+---
+
+## Phase 5 — Actually test a restore
+**How urgent: Medium — this is the phase that turns "we hope this works" into "we know this
+works."**
+
+- [ ] Get a throwaway test server matching `k3-master`'s specs
+- [ ] Go through the entire [restore runbook](03-restore-runbook.md) on it, start to finish
+- [ ] Write down exactly how long it took
+- [ ] Fix whatever broke along the way, and update the runbook to reflect what actually happened
+- [ ] Confirm the restored Prometheus actually has **old, historical** data in it — proof that
+      the app-data restore really worked, not just that the pods started up
+- [ ] Schedule this test to repeat **every 3 months**
+
+---
+
+## Phase 6 — Close remaining unknowns
+**How urgent: Low — doesn't block phases 0–5, but does need to happen before we can call this
+truly "done."**
+
+- [ ] Work through the [list of open questions](05-gaps-and-open-questions.md), one at a time
+- [ ] Figure out where our HTTPS certificates actually come from (we didn't find any
+      certificate-management tool during discovery) and how to back that up
+- [ ] Make a clear decision: is it OK that all our backups sit in one AWS region, or do we need
+      backups copied to a second region too?
+- [ ] Assign one specific person to be responsible for rotating the backup login
+      credentials on a regular schedule
+- [ ] Keep this repo as the one true copy of all this documentation — never let it live only on
       `k3-master`
-- [ ] Verify S3 connectivity and egress from `k3-master` with a throwaway object
 
 ---
 
-## Phase 1 — Node & cluster-state backup (Track A)
-**Priority: P0**
+## When is this whole project actually "done"?
 
-Covers [components 1–4 and 8](02-backup-strategy.md#3-backup-components).
+We can call the backup project complete when **all** of these are true:
 
-- [ ] Script a **consistent** SQLite backup using the `.backup` API — never a raw `cp` of a live
-      WAL database
-- [ ] Add `tar` of `server/{tls,cred,token,manifests}` to the same script, taken alongside the DB
-      snapshot
-- [ ] Add `tar` of `/etc/rancher/k3s` and `/etc/systemd/system/k3s.service`
-- [ ] Capture node OS configuration into `node-config/`: netplan, UFW rules, SSH host keys and
-      `authorized_keys`, timezone/NTP, `dpkg --get-selections`
-- [ ] Generate the container image manifest from live pods in the same run
-- [ ] SHA-256 checksum every archive **before** upload; store the checksum alongside it
-- [ ] Upload to the matching S3 prefixes
-- [ ] Schedule via a **systemd timer** — match the existing `dpkg-db-backup.timer` convention
-      rather than reintroducing cron (the server has no root crontab today; keep it that way)
-- [ ] Verify a full cycle produces the expected objects in every prefix
-- [ ] Commit the script to `scripts/` in this repository
-
----
-
-## Phase 2 — Kubernetes-level backup (Track B)
-**Priority: P0**
-
-Covers [components 5, 6 and 7](02-backup-strategy.md#3-backup-components). This is what makes
-migration and DR-to-a-new-VM possible at all.
-
-- [ ] Install Velero + the AWS S3 plugin, pointed at the same bucket under the `velero/` prefix
-- [ ] Enable the **node-agent** (restic / kopia) — required for `local-path` filesystem backup,
-      which has no CSI snapshot capability
-- [ ] Create a daily schedule covering **every** namespace, not just application namespaces
-- [ ] Confirm the six monitoring PVCs are actually included in the backup
-- [ ] Verify a completed backup lists restorable items — **do not trust a green exit code alone**
-- [ ] Perform one scoped test restore of a single non-critical resource to prove the path works
-
----
-
-## Phase 3 — GitOps recoverability (Track C)
-**Priority: P1**
-
-Covers [component 9](02-backup-strategy.md#component-9--git--argocd-recoverability).
-
-- [ ] Audit every ArgoCD Application: confirm each is defined via app-of-apps in Git, not created
-      ad hoc. Anything created ad hoc is unrecoverable from Git alone.
-- [ ] Schedule daily `argocd admin export` to the `argocd-export/` prefix
-- [ ] Document exactly which Git remotes and credentials the ArgoCD repo-server depends on
-- [ ] Confirm whether the monitoring stack (Prometheus/Loki/Grafana) is deployed as
-      config-as-code. If it is, monitoring *configuration* recovery collapses into this track and
-      only *historical data* needs Phase 2.
-
----
-
-## Phase 4 — Automation & retention
-**Priority: P1**
-
-- [ ] Apply the S3 lifecycle rules from the
-      [retention matrix](02-backup-strategy.md#retention-matrix)
-- [ ] Push a `backup_last_success_timestamp` metric from each job
-- [ ] Wire alerts into the **existing** Alertmanager — alert if any track's timestamp is stale by
-      more than 1.5× its own frequency. No new alerting tool.
-- [ ] Confirm the alert actually fires by deliberately failing one job
-- [ ] Let all three tracks run unattended for **one full week** before relying on them
-
----
-
-## Phase 5 — Restore validation
-**Priority: P1 — the phase that converts hope into evidence.**
-
-- [ ] Provision a throwaway VM matching `k3-master`'s specification
-- [ ] Execute the full [restore runbook](03-restore-runbook.md) end-to-end against it
-- [ ] Record the actual RTO
-- [ ] Fix whatever breaks, and update the runbook with what was actually required
-- [ ] Confirm restored Prometheus contains **historical** data — proof that PVC restore worked,
-      not just that pods started
-- [ ] Schedule the drill to repeat **quarterly**
-
----
-
-## Phase 6 — Close known gaps
-**Priority: P2 — does not block Phases 0–5, but does block a clean restore.**
-
-- [ ] Work through the [gap list](05-gaps-and-open-questions.md) — one issue per gap
-- [ ] Determine the ingress TLS certificate source (no cert-manager was observed) and how to back
-      it up
-- [ ] Decide explicitly whether single-region S3 is acceptable, or whether cross-region
-      replication is warranted
-- [ ] Assign a named owner and rotation cadence for the backup IAM credentials
-- [ ] Keep this repository as the canonical copy of all DR documentation — it must never live only
-      on `k3-master`
-
----
-
-## Definition of done
-
-The backup programme is complete when **all** of the following are true:
-
-1. All three tracks run automatically, unattended, on schedule
-2. A failed backup pages someone within one cycle
-3. The restore runbook has been executed successfully at least once, end to end
-4. The measured RTO is known and accepted by the business
-5. This documentation lives in Git, not on the server it describes recovering
+1. All three backup tracks run automatically, on their own, on schedule
+2. If a backup ever fails, someone gets alerted within one cycle
+3. We've successfully run through the entire restore process at least once, start to finish
+4. We know exactly how long a full restore takes, and the business has agreed that's acceptable
+5. This documentation lives in Git — not only on the server it's describing how to recover

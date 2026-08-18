@@ -1,110 +1,115 @@
-# 01 — Discovery Baseline (Verified)
+# 01 — Discovery Baseline (Verified Facts)
 
-**Host:** `k3-master`
-**Status:** Authoritative. Every value below was observed directly on the server.
-**Scope note:** This document records *what is*. It makes no recommendations — those live in
-[02 — Backup Strategy](02-backup-strategy.md).
+**Server:** `k3-master`
+**How sure are we:** Very. Every number below was actually checked on the real server — nothing
+here is a guess.
+**What this document is:** Just the facts, as they are right now. Any advice or decisions based on
+these facts live in [02 — Backup Strategy](02-backup-strategy.md), not here.
 
 ---
 
-## 1. Host
+## 1. The server itself
 
-| Property | Value |
+| Thing | Value |
 |----------|-------|
-| Hostname | `k3-master` |
-| OS | Ubuntu 24.04.3 LTS (Noble) |
-| Kernel | `6.8.0-137-generic` |
-| Architecture | `x86_64` |
-| CPU | 8 vCPU |
-| Memory | 22 GiB total / ~9.7 GiB used / ~13 GiB available |
-| Swap | Disabled |
-| Uptime at discovery | ~3 days |
+| Server name | `k3-master` |
+| Operating system | Ubuntu 24.04.3 LTS ("Noble") |
+| Kernel version | `6.8.0-137-generic` |
+| Chip type | 64-bit (x86_64) |
+| CPU | 8 cores |
+| Memory (RAM) | 22 GB total, about 9.7 GB in use, about 13 GB free |
+| Swap space | Turned off |
+| How long it's been running | About 3 days at the time we checked |
 
 ### Network addresses
 
-| Address | Role |
+| Address | What it's for |
 |---------|------|
-| `45.90.98.51` | Primary public / server IP |
-| `10.10.10.103` | Private / server-side IP |
-| `172.17.0.1` | Docker bridge |
-| `10.42.1.0`, `10.42.1.1` | K3s pod CIDR / CNI |
+| `45.90.98.51` | The main public address — how the internet reaches this server |
+| `10.10.10.103` | An internal/private address |
+| `172.17.0.1` | Docker's internal networking |
+| `10.42.1.0`, `10.42.1.1` | Used internally by K3s for pod networking |
 
 ---
 
-## 2. Disk & filesystem
+## 2. Disk space
 
-### Root filesystem
+### The main disk
 
-| Property | Value |
+| Thing | Value |
 |----------|-------|
-| Device | `/dev/mapper/ubuntu--vg-ubuntu--lv` |
-| Type | ext4 |
-| Size | 97 G |
-| Used | 59 G |
-| Available | **34 G** |
-| Usage | 64 % |
+| Device name | `/dev/mapper/ubuntu--vg-ubuntu--lv` |
+| Format | ext4 |
+| Total size | 97 GB |
+| Used | 59 GB |
+| Free | **34 GB** |
+| % full | 64% |
 
-### Boot
+### The boot disk
 
-| Property | Value |
+| Thing | Value |
 |----------|-------|
-| Device | `/dev/vda2` |
-| Size | 2.0 G |
-| Used | ~200 M |
+| Device name | `/dev/vda2` |
+| Total size | 2.0 GB |
+| Used | About 200 MB |
 
-### Inodes
+### File count limit (inodes)
 
-| Property | Value |
+Every filesystem has a limit on how many files it can hold, separate from how much space they
+take up. Here's where we stand:
+
+| Thing | Value |
 |----------|-------|
-| Total | ~6.2 M |
-| Used | ~2.5 M |
-| Free | ~3.7 M |
-| Usage | 41 % |
+| Total allowed | About 6.2 million |
+| Used | About 2.5 million |
+| Free | About 3.7 million |
+| % used | 41% |
 
-**Conclusion:** No disk pressure, no inode pressure. **34 GB free** is the working constraint
-for any local backup staging or retention design.
+**Bottom line:** Plenty of room, no problems. **34 GB free** is the number to keep in mind when
+deciding how much backup data we can temporarily store on this server before sending it to S3.
 
 ---
 
-## 3. K3s
+## 3. K3s (our Kubernetes)
 
 ```text
 k3s version v1.34.5+k3s1
 go version   go1.24.13
 ```
 
-| Property | Value |
+| Thing | Value |
 |----------|-------|
-| Binary | `/usr/local/bin/k3s` |
-| Binary size | ~72 MB |
-| Systemd unit | `/etc/systemd/system/k3s.service` |
-| Service state | `active`, `enabled` |
-| Runs as | `root` |
+| Program location | `/usr/local/bin/k3s` |
+| Program size | About 72 MB |
+| Managed by | systemd, unit file `/etc/systemd/system/k3s.service` |
+| Currently | Running, and set to start automatically on boot |
+| Runs as | The `root` user |
 | Start command | `/usr/local/bin/k3s server` |
-| Restart policy | `Restart=always`, `RestartSec=5s` |
+| If it crashes | Restarts automatically after 5 seconds |
 
-No external-datastore argument was present in the observed service command.
+We checked — there's no sign that K3s is pointed at some separate external database. It manages
+its own data.
 
 ---
 
-## 4. Cluster topology
+## 4. How the cluster is set up
 
 ```text
 NAME        STATUS   ROLES           VERSION
 k3-master   Ready    control-plane   v1.34.5+k3s1
 ```
 
-| Property | Value |
+| Thing | Value |
 |----------|-------|
-| Cluster type | Single-node K3s |
-| Control plane | `k3-master` |
-| Worker nodes | None discovered separately |
-| High availability | **No** |
-| Node status at discovery | `Ready` |
+| Type of cluster | Single server only |
+| Main/control server | `k3-master` |
+| Other worker servers | None — this is the only one |
+| Can it survive this server going down? | **No** — there's no backup server to take over |
+| Current health | `Ready` (healthy) |
 
 ---
 
-## 5. Datastore — **SQLite**
+## 5. Where K3s stores its data — **SQLite**
 
 ### Location
 
@@ -113,141 +118,152 @@ k3-master   Ready    control-plane   v1.34.5+k3s1
 ├── state.db        ~64 MB
 ├── state.db-wal    ~27 MB
 ├── state.db-shm    ~160 KB
-└── etcd/           (contains only: name)
+└── etcd/           (basically empty, just a name file)
 ```
 
-`file state.db` → **SQLite 3.x database**. Total datastore footprint ≈ **91 MB**.
+We confirmed this is a **SQLite database** — a lightweight, single-file type of database (not a
+big separate database server). All together it's about **91 MB**.
 
-### Embedded etcd — DISABLED
+### The "etcd" backup feature — turned off
+
+Kubernetes clusters sometimes use something called `etcd` as their database, which comes with its
+own built-in snapshot/backup tool. We checked, and it's turned off here:
 
 ```console
 $ sudo k3s etcd-snapshot ls
 Error: etcd datastore disabled
 ```
 
-The snapshot directory does not exist. **`k3s etcd-snapshot` is therefore not an applicable
-backup mechanism on this server.**
+**In plain words: the normal `k3s etcd-snapshot` backup command will not work on this server**,
+because we're using SQLite instead of etcd. We need a different backup method (see
+[Backup Strategy §3, Component 1](02-backup-strategy.md#component-1--k3s-datastore)).
 
-### External datastore — none
+### No external database either
 
-No evidence of PostgreSQL, MySQL, or external etcd serving as the K3s datastore.
+We checked for PostgreSQL, MySQL, or an external etcd server being used as K3s's database.
+Found none. K3s manages its own SQLite file, right there on this server.
 
-### WAL implication
+### Why this matters: the database is "live"
 
-SQLite is actively using write-ahead logging. `state.db` alone is **not** a complete backup —
-the `-wal` and `-shm` files are part of the consistent state. The entire
-`/var/lib/rancher/k3s/server/db/` directory is the recovery unit.
+SQLite is actively writing to a "WAL" file (Write-Ahead Log — basically a scratchpad it uses
+before saving changes permanently). That means: **just copying `state.db` alone is NOT a safe
+backup.** The `-wal` and `-shm` files next to it are part of the same live data. All three files
+together are what actually needs to be backed up as one unit.
 
 ---
 
-## 6. K3s configuration files
+## 6. K3s's configuration files
 
 ```text
-/etc/rancher/k3s/          (12 K total)
-├── k3s.yaml               ~2.9 K
-└── registries.yaml        ~180 B
+/etc/rancher/k3s/          (12 KB total — tiny)
+├── k3s.yaml               ~2.9 KB
+└── registries.yaml        ~180 bytes
 ```
 
-**`/etc/rancher/k3s/config.yaml` does not exist** on this server.
+Note: **there is no `/etc/rancher/k3s/config.yaml` file** on this server (some setups have one,
+this one doesn't).
 
 ---
 
-## 7. Server token
+## 7. The server's secret access token
 
-| Property | Value |
+| Thing | Value |
 |----------|-------|
-| Path | `/var/lib/rancher/k3s/server/token` |
+| Location | `/var/lib/rancher/k3s/server/token` |
 | Size | 109 bytes |
-| Owner / group | `root:root` |
-| Permissions | `0600` (`-rw-------`) |
-| Classification | **P0 / Critical, sensitive** |
+| Who can access it | Only `root` |
+| File permissions | `0600` (locked down — only the owner can read/write it) |
+| How important is it | **Extremely — this is a top-priority secret** |
 
-Token *content* has never been displayed, logged, or exported during discovery, and must not be.
+We have never looked inside this file, printed it, or copied its contents anywhere. That should
+stay true — we only need to know *where* it is, never *what's inside it*.
 
 ---
 
-## 8. K3s directory usage
+## 8. How much disk space K3s actually uses
 
-| Path | Size | Notes |
+| Folder | Size | Notes |
 |------|------|-------|
-| `/var/lib/rancher/k3s/agent` | ~43 GB | Container images, runtime cache — **not DR data** |
-| `/var/lib/rancher/k3s/storage` | ~7.8 GB | local-path PVC data |
-| `/var/lib/rancher/k3s/data` | ~233 MB | Extracted K3s binaries |
-| `/var/lib/rancher/k3s/server` | ~92 MB | Control-plane state — **the critical part** |
+| `/var/lib/rancher/k3s/agent` | ~43 GB | Downloaded container images + cache. **Not something we need to back up** — it can be re-downloaded anytime. |
+| `/var/lib/rancher/k3s/storage` | ~7.8 GB | Data saved by our apps (like Prometheus's metrics) |
+| `/var/lib/rancher/k3s/data` | ~233 MB | K3s's own extracted program files — also replaceable by reinstalling |
+| `/var/lib/rancher/k3s/server` | ~92 MB | **The actual important stuff** — certificates, database, keys |
 | **Total** | **~51 GB** | |
-| ↳ `/var/lib/rancher/k3s/server/db` | ~91 MB | |
+| ↳ just the database inside `server` | ~91 MB | |
 
-**Conclusion:** `tar` of the whole `/var/lib/rancher/k3s` tree is the wrong design. 43 GB of the
-51 GB is reproducible agent/runtime cache. The genuinely irreplaceable control-plane state is
-under 100 MB.
+**Bottom line:** Backing up the *entire* `/var/lib/rancher/k3s` folder as one big archive would
+be the wrong approach — 43 of the 51 GB is just downloaded container images that we don't need to
+save. The stuff that's actually irreplaceable is under 100 MB.
 
 ---
 
-## 9. Persistent storage backend
+## 9. Where app data files are stored
 
-| Property | Value |
+| Thing | Value |
 |----------|-------|
-| StorageClass | `local-path` (default) |
-| Provisioner | `rancher.io/local-path` |
-| Reclaim policy | **`Delete`** |
-| Volume binding mode | `WaitForFirstConsumer` |
-| Physical path | `/var/lib/rancher/k3s/storage` |
-| Provisioner pod | Running |
+| Storage type used | `local-path` (the default option, and it's what's active here) |
+| Who manages it | A built-in tool called `rancher.io/local-path` |
+| What happens if a data volume is deleted | **It's gone — deleted, not recoverable** |
+| When does storage get created | Only once something actually needs to use it |
+| Where the files actually live on disk | `/var/lib/rancher/k3s/storage` |
+| Is the tool that manages this running | Yes |
 
-⚠️ Reclaim policy `Delete` means PVC deletion destroys the underlying data. This shapes the
-accidental-deletion recovery scenario.
+⚠️ **Important:** because deleting a data volume permanently deletes its data (no safety net), if
+someone deletes the wrong thing by accident, backups are the only way to get it back.
 
 ---
 
-## 10. PVC inventory
+## 10. What's actually using storage right now
 
-Six bound PVCs, all in namespace `monitoring`, all `RWO` / `local-path` / `Filesystem` / `Bound`.
-Six corresponding PVs exist, all `Bound`, all reclaim policy `Delete`.
+We found 6 data volumes in use, all in the `monitoring` namespace (the section of the cluster
+where our monitoring tools live). All of them are working normally (`Bound`).
 
-| PVC | Provisioned | Actual usage |
+| What it's for | How much space it's allowed | How much it's actually using |
 |-----|------------:|-------------:|
-| Prometheus | 20 Gi | ~5.5 GB |
-| Loki MinIO | 20 Gi | ~2.2 GB |
-| Loki Backend | 10 Gi | ~264 KB |
-| Loki Write | 10 Gi | ~9.6 MB |
-| Grafana | 5 Gi | ~50 MB |
-| Alertmanager | 2 Gi | ~12 KB |
-| *(Traefik, non-PVC)* | — | ~28 KB |
-| **Total** | **67 Gi provisioned** | **~7.8 GB actual** |
+| Prometheus (metrics) | 20 GB | ~5.5 GB |
+| Loki / MinIO (log storage) | 20 GB | ~2.2 GB |
+| Loki Backend | 10 GB | ~264 KB |
+| Loki Write | 10 GB | ~9.6 MB |
+| Grafana (dashboards) | 5 GB | ~50 MB |
+| Alertmanager (alerts) | 2 GB | ~12 KB |
+| *(Traefik — no data volume)* | — | ~28 KB |
+| **Total** | **67 GB allowed** | **~7.8 GB actually used** |
 
-Prometheus and Loki MinIO together account for almost all persistent local data.
-
----
-
-## 11. Workload → PVC mapping
-
-| Workload group | PVC | Implication |
-|----------------|-----|-------------|
-| Monitoring stack (6 above) | Yes | Data recovery matters |
-| `cow-dev`, `cow-staging` | **`<none>`** | Stateless — GitOps-recoverable |
-| `sbe-dev`, `sbe-staging`, `sbe-uat` | **`<none>`** | Stateless — GitOps-recoverable |
-
-**Conclusion:** Application recovery and monitoring-history recovery are cleanly separable
-concerns and should be handled by different mechanisms.
+Prometheus and Loki/MinIO together make up almost all of the real usage.
 
 ---
 
-## 12. Databases inside the cluster
+## 11. Which apps use which storage
 
-Pod images were searched for PostgreSQL, MySQL, MariaDB, Redis, MongoDB, Elasticsearch, OpenSearch.
+| App group | Has its own data volume? | What that means |
+|----------------|-----|------------------|
+| Monitoring stack (the 6 above) | Yes | We need to back up their actual data |
+| `cow-dev`, `cow-staging` | **No** | These apps don't save anything to disk — they can be rebuilt just by redeploying from Git |
+| `sbe-dev`, `sbe-staging`, `sbe-uat` | **No** | Same as above |
 
-| Found | Detail |
+**Bottom line:** Backing up our apps and backing up monitoring data are two completely separate
+problems, and we can solve them with different tools.
+
+---
+
+## 12. Databases running inside our apps
+
+We checked every container image for signs of PostgreSQL, MySQL, MariaDB, Redis, MongoDB,
+Elasticsearch, or OpenSearch.
+
+| What we found | Details |
 |-------|--------|
-| ArgoCD Redis | `public.ecr.aws/docker/library/redis:8.2.3-alpine` — **no persistent PVC mapped** |
-| PostgreSQL / MySQL / MariaDB / MongoDB | **None found** |
+| ArgoCD's own Redis | Used internally by ArgoCD — **has no data volume**, so nothing to back up there |
+| PostgreSQL / MySQL / MariaDB / MongoDB | **None found anywhere** |
 
-No application database runs inside K3s.
+**Bottom line: our apps don't run their own database inside the cluster.** We don't need to worry
+about backing up an app database — there isn't one.
 
 ---
 
-## 13. ArgoCD
+## 13. ArgoCD (deploys our apps automatically from Git)
 
-Namespace exists. All core pods `Running`:
+The ArgoCD section exists and all its main pieces are running fine:
 
 ```text
 argocd-application-controller
@@ -259,9 +275,9 @@ argocd-repo-server
 argocd-server
 ```
 
-### Application health at discovery
+### App health, as we found it
 
-**Synced / Healthy** — primary workloads:
+**Working fine** — our real, important apps:
 
 ```text
 cow-dev-cow-product-service      sbe-dev-admin-api
@@ -271,138 +287,135 @@ cow-staging-cow-web              sbe-staging-bridge-api
                                  sbe-uat-pulse-broker-api
 ```
 
-**Pre-existing unhealthy state** — demo/non-primary apps:
+**Already broken before we even started** — just demo/test apps, not real ones:
 
-| Application | State |
+| App | State |
 |-------------|-------|
-| `demo-app` | OutOfSync / Missing |
-| `nginx-app` | Synced / Degraded |
-| `nginx-app-dev` | OutOfSync / Degraded |
-| `nginx-app11` | OutOfSync / Degraded |
+| `demo-app` | Not synced / missing |
+| `nginx-app` | Synced, but unhealthy |
+| `nginx-app-dev` | Not synced, unhealthy |
+| `nginx-app11` | Not synced, unhealthy |
 
-> ⚠️ **These conditions existed before any backup work began.** During a restore drill they must
-> not be mistaken for restore failures.
+> ⚠️ **Important:** these four were already broken before any backup work started. When we
+> eventually test a restore, don't mistake these for something the restore broke — they were
+> already like this.
 
 ---
 
-## 14. K3s static manifests
+## 14. K3s's own built-in setup files
 
 ```text
-/var/lib/rancher/k3s/server/manifests/     (~68 K)
+/var/lib/rancher/k3s/server/manifests/     (~68 KB total)
 ├── coredns.yaml
 ├── runtimes.yaml
 ├── metrics-server/*
 ├── local-storage.yaml
-├── traefik-helmchartconfig.yaml    ← older timestamp than the rest
+├── traefik-helmchartconfig.yaml    ← someone edited this one by hand
 ├── ccm.yaml
 ├── traefik.yaml
 └── rolebindings.yaml
 ```
 
-`traefik-helmchartconfig.yaml` carries an older timestamp than the auto-generated defaults,
-indicating manual modification. It is the one file here that is genuinely irreplaceable.
+We noticed `traefik-helmchartconfig.yaml` has an older "last modified" date than the others,
+which is a sign someone manually edited it at some point. That makes it the one file here that
+can't just be regenerated automatically — worth double-checking before ever overwriting it.
 
 ---
 
-## 15. Existing backup automation — **none**
+## 15. Existing backups — **there are none**
 
-| Check | Result |
+| What we checked | What we found |
 |-------|--------|
-| Root crontab | None |
-| K3s backup cron | None |
-| K3s snapshot timer | None |
-| Backup-related systemd timer | Only `dpkg-db-backup.timer` (OS package DB — **not** K3s) |
-| K3s service | `enabled` |
+| Scheduled tasks for root | None set up |
+| A backup job for K3s | None |
+| A snapshot schedule for K3s | None |
+| Any backup-related scheduled task | Only one unrelated to K3s — a routine Ubuntu package-list backup |
+| Is K3s itself running | Yes, and set to start on boot |
 
 ```text
-K3s automated backup   NOT configured
-SQLite backup          NOT configured
-PVC backup             NOT configured
-Offsite backup         NOT configured
-Restore test           NEVER performed
+Automatic K3s backup     NOT set up
+SQLite backup            NOT set up
+App data backup          NOT set up
+Copy stored off the server   NOT set up
+Restore ever tested      NEVER
 ```
 
 ---
 
-## 16. Installed tooling
+## 16. Tools already installed on the server
 
-| Tool | Present |
+| Tool | Installed? |
 |------|:-------:|
-| `rsync` | ✅ |
-| `aws` (CLI) | ✅ |
-| `tar` | ✅ |
-| `gzip` | ✅ |
-| `rclone` | ❌ |
-| `sqlite3` (CLI) | ❌ |
+| `rsync` (file copying tool) | ✅ Yes |
+| `aws` (Amazon's command-line tool) | ✅ Yes |
+| `tar` (for making archive files) | ✅ Yes |
+| `gzip` (for compressing files) | ✅ Yes |
+| `rclone` (cloud file sync tool) | ❌ No |
+| `sqlite3` (command-line tool for SQLite) | ❌ No |
 
-The absent `sqlite3` CLI matters — a consistent SQLite backup requires the `.backup` API, not a
-file copy. See [Backup Strategy §3, component 1](02-backup-strategy.md#component-1--k3s-datastore).
+The missing `sqlite3` tool matters: doing a safe backup of a live SQLite database requires using
+its proper "backup" feature — not just copying the file. We can do this using Python instead
+(which has the same feature built in), so we don't strictly need to install anything new. See
+[Backup Strategy §3, Component 1](02-backup-strategy.md#component-1--k3s-datastore) for details.
 
 ---
 
-## 17. Hosting provider — **Datalix, treated as on-premise**
+## 17. Who hosts this server — **not fully confirmed at first, later resolved**
 
 ```console
 $ curl http://169.254.169.254/latest/meta-data/instance-id
 AWS EC2 metadata not available
 ```
 
-Confirmed by the operator: the server is hosted with **Datalix**, on a public IP, and is to be
-treated operationally as an **on-premise / bare-metal server**. The AWS CLI being installed does
-not imply the server runs on AWS — it does not.
+This told us the server is **not** an Amazon AWS virtual machine (even though the `aws` command-line
+tool happens to be installed — that doesn't mean AWS hosts it). This doesn't stop us from using
+Amazon S3 as our backup storage though — we can still send backups there over the internet, we
+just can't use any AWS-specific shortcuts for hosting-level snapshots.
 
-| Property | Value |
-|----------|-------|
-| Provider | Datalix |
-| Treat as | On-premise / bare metal |
-| Hypervisor snapshot fallback | **None available** |
-| S3 as a remote destination | Still valid — needs only credentials and outbound HTTPS |
-
-> ⚠️ **This is the most consequential fact in this document.** There is no provider-level snapshot,
-> no EBS volume backup, no console "restore VM" button. If this box is lost, the *only* path back
-> is the S3 backup set plus [03 — Restore Runbook](03-restore-runbook.md). Every "belt and
-> suspenders" assumption elsewhere in these docs should be read as absent here.
+*(This was later confirmed: the actual hosting provider is Datalix, and we're treating it as an
+on-premise-style server with no automatic hosting-level snapshot feature available.)*
 
 ---
 
-## 18. Discovery completeness
+## 18. How complete is this fact-finding?
 
 | Item | Status |
 |------|--------|
-| Host / OS / CPU / RAM / disk | ✅ Complete |
-| K3s version / service / topology | ✅ Complete |
-| Control-plane health | ✅ Complete |
-| Datastore type | ✅ SQLite |
-| Embedded etcd | ✅ Confirmed disabled |
-| External datastore | ✅ No evidence |
-| SQLite path / size / WAL | ✅ Complete |
-| Server token + permissions | ✅ Complete |
-| K3s config + static manifests | ✅ Complete |
-| PVC / PV / StorageClass inventory | ✅ Complete |
-| PVC actual usage | ✅ Complete |
-| Workload → PVC mapping | ✅ Complete |
-| In-cluster database discovery | ✅ Complete |
-| ArgoCD health + applications | ✅ Complete |
-| Existing cron / snapshot backups | ✅ Checked — none |
-| Required CLI tooling | ✅ Complete |
-| Hosting provider | ✅ Confirmed — Datalix, on-premise, no snapshot fallback |
-| **`server/tls/` contents** | ⚠️ **Not enumerated** |
-| **`server/cred/` contents** | ⚠️ **Not enumerated** |
-| **Node OS config** (netplan, UFW, SSH, NTP) | ⚠️ **Not captured** |
-| **Ingress TLS certificate source** | ⚠️ **Not determined** |
-| **OS package selections** | ⚠️ **Not captured** |
+| Server hardware / OS / CPU / memory / disk | ✅ Fully checked |
+| K3s version / service / setup | ✅ Fully checked |
+| Is the control server healthy | ✅ Fully checked |
+| What database K3s uses | ✅ SQLite, confirmed |
+| Is etcd's snapshot feature usable here | ✅ Confirmed: no, it's disabled |
+| Any external database | ✅ Confirmed: none |
+| SQLite file location / size / live-write behavior | ✅ Fully checked |
+| The server's secret token + who can read it | ✅ Fully checked |
+| K3s's config files and built-in setup files | ✅ Fully checked |
+| Data volumes in use | ✅ Fully checked |
+| How much data volumes are actually using | ✅ Fully checked |
+| Which apps use which data volumes | ✅ Fully checked |
+| Databases running inside our own apps | ✅ Fully checked |
+| ArgoCD health and app list | ✅ Fully checked |
+| Existing scheduled backups | ✅ Checked — there are none |
+| Required tools installed | ✅ Fully checked |
+| **Who hosts this server** | ⚠️ Wasn't confirmed at first — later resolved (Datalix, on-premise style) |
+| **What's inside the `server/tls/` folder** | ⚠️ **Not checked file-by-file yet** |
+| **What's inside the `server/cred/` folder** | ⚠️ **Not checked file-by-file yet** |
+| **The server's network/firewall/login setup** | ⚠️ **Not written down yet** |
+| **Where our HTTPS certificate actually comes from** | ⚠️ **Not confirmed yet** |
+| **List of installed system packages** | ⚠️ **Not saved yet** |
 
-The remaining ⚠️ items are tracked in [05 — Gaps & Open Questions](05-gaps-and-open-questions.md).
+The five ⚠️ items still open are tracked in
+[05 — Gaps & Open Questions](05-gaps-and-open-questions.md).
 
 ---
 
-## Authoritative summary
+## Summary, in plain words
 
-`k3-master` is a **single-node Ubuntu 24.04.3 K3s cluster running v1.34.5+k3s1 with SQLite as
-its active datastore**. Embedded etcd is disabled; no external datastore exists. Cluster-state
-data is small (~91 MB), while total K3s disk usage is ~51 GB because the agent directory
-consumes ~43 GB and local persistent volumes ~7.8 GB. Six `local-path` PVCs serve the monitoring
-stack, dominated by Prometheus (~5.5 GB) and Loki MinIO (~2.2 GB). SBE and COW application
-workloads use no PVCs and are managed through ArgoCD/GitOps. **No K3s backup, SQLite backup,
-snapshot schedule, or backup cron is currently configured.** The server token exists securely at
-`0600 root:root`.
+`k3-master` is **one single server** running Ubuntu 24.04.3, using K3s version `v1.34.5+k3s1`,
+with a simple built-in **SQLite** database (no separate etcd, no external database). The truly
+critical data — the database plus certificates — is small, under 100 MB. The K3s folder looks
+big (~51 GB) but that's mostly just downloaded container images (~43 GB) that don't need
+backing up. Six data volumes hold our monitoring data (about 7.8 GB total, mostly Prometheus and
+Loki). Our real apps (SBE and COW) don't store anything on disk — they're rebuilt automatically
+from Git through ArgoCD. **Right now, there is no backup of any kind set up.** The server's
+secret access token is stored safely, locked down to root-only access.

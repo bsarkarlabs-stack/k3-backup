@@ -1,107 +1,110 @@
 # k3-backup
 
-Disaster-recovery documentation, backup strategy, and implementation tracking for the
-single-node K3s cluster **`k3-master`**.
+This repo explains how we back up our server `k3-master` and how we would bring it back to life
+if it ever broke, got deleted, or had to move to a new machine.
 
-> **Private repository.** These documents contain server IP addresses, filesystem paths,
-> and infrastructure topology. They contain **no secrets, tokens, or key material** — and
-> must never be made to.
+`k3-master` runs **K3s** (a lightweight version of Kubernetes) and everything on it is important:
+our production apps, our monitoring (Prometheus, Grafana, Loki), and ArgoCD (which deploys our
+apps from Git).
 
-## Goal
+> **This is a private repo.** It has server IP addresses, folder paths, and how our system is
+> laid out. It does **not** contain any passwords, tokens, or keys, and it never should.
 
-> Fresh Ubuntu Server → Install compatible K3s → Restore backup → Restore workloads/data → Validate production.
+## The one-line goal
 
-## Documents
+> If the server dies: get a fresh Ubuntu server → install the same version of K3s → restore our
+> backup → check everything works.
 
-| # | Document | What it covers |
-|---|----------|----------------|
-| 01 | [Discovery Baseline](docs/01-discovery-baseline.md) | Verified state of `k3-master` — host, K3s, datastore, storage, workloads. The authoritative fact base. |
-| 02 | [Backup Strategy](docs/02-backup-strategy.md) | The nine backup components, three recovery tracks, S3 layout, retention, alerting. |
-| 03 | [Restore Runbook](docs/03-restore-runbook.md) | Ordered fresh-server → production recovery procedure. |
-| 04 | [Implementation TODO](docs/04-implementation-todo.md) | Phased build plan. Mirrored into GitHub Issues. |
-| 05 | [Gaps & Open Questions](docs/05-gaps-and-open-questions.md) | What discovery did not establish and must not be assumed. |
-| 06 | [Developer Access](docs/06-developer-access.md) | SSH deploy-key setup for cloning and pushing to this repo. |
-| 07 | [Phase 0 & 1 Execution Runbook](docs/07-phase-0-1-execution.md) | Copy-paste commands to build Phases 0 and 1 on the live server, with a per-stage downtime risk register, verification after every step, and rollback. |
+## Read the docs in this order
 
-## Scripts
+| # | Document | In plain words |
+|---|----------|-----------------|
+| 01 | [Discovery Baseline](docs/01-discovery-baseline.md) | Everything we checked and confirmed about the server as it is today. This is the "facts" document — nothing is guessed. |
+| 02 | [Backup Strategy](docs/02-backup-strategy.md) | What we back up, why, how often, and where it goes in S3. |
+| 03 | [Restore Runbook](docs/03-restore-runbook.md) | Step-by-step: what to do, in order, to bring the server back from a backup. |
+| 04 | [Implementation TODO](docs/04-implementation-todo.md) | The build plan, broken into phases. Matches our GitHub Issues. |
+| 05 | [Gaps & Open Questions](docs/05-gaps-and-open-questions.md) | Things we still don't know for sure. Don't assume — read this first if something is unclear. |
+| 06 | [Developer Access](docs/06-developer-access.md) | How a new developer gets permission to clone and push to this repo. |
 
-| Path | Purpose |
-|------|---------|
-| [`scripts/k3s-track-a-backup.sh`](scripts/k3s-track-a-backup.sh) | Track A backup — SQLite online-backup snapshot, server identity, config, manifests, node OS config, image manifest. Read-only against K3s; never restarts it. |
-| [`scripts/systemd/`](scripts/systemd/) | `k3s-backup@.service` plus the 6-hourly `db` and daily `full` timers. |
+## Where things stand right now
 
-## Current status
-
-| Area | Status |
+| Task | Status |
 |------|--------|
-| Discovery baseline | ✅ Verified |
-| Backup strategy design | ✅ Documented |
-| Restore runbook | ✅ Documented (untested) |
-| S3 bucket + IAM | ⏳ Not created |
-| Cluster-state backup automation | ⏳ Not built |
-| Velero (K8s resources + PVC data) | ⏳ Not installed |
-| ArgoCD export automation | ⏳ Not built |
-| Retention lifecycle rules | ⏳ Not configured |
-| Failure alerting | ⏳ Not configured |
-| Restore drill | ⏳ Never performed |
+| Checked and wrote down everything about the server | ✅ Done |
+| Decided how backups should work | ✅ Done (written down, not yet tested) |
+| Wrote the step-by-step restore guide | ✅ Done (written down, not yet tested) |
+| Created the S3 bucket + permissions | ⏳ Not done yet |
+| Script that backs up the cluster automatically | ⏳ Not done yet |
+| Velero (backs up apps, secrets, and disks) | ⏳ Not installed yet |
+| Auto-delete old backups after some time | ⏳ Not set up yet |
+| Alert us if a backup fails | ⏳ Not set up yet |
+| Actually testing a full restore | ⏳ Never done yet |
 
-## Issue index
+## Where the work is tracked
 
-Work is tracked as GitHub Issues. **Issue numbers are not sequential by phase** — they were
-created out of order.
+We track the actual work as GitHub Issues. (The issue numbers don't follow the phase order below —
+they were created at different times.)
 
-### Implementation phases
+### Build phases
 
-| Phase | Issue | Priority |
-|-------|-------|----------|
-| 0 — Foundations: S3 bucket, IAM, sqlite3 | [#9](../../issues/9) | P0 |
-| 1 — Track A: node & cluster-state backup | [#10](../../issues/10) | P0 |
-| 2 — Track B: Velero resources + PVC data | [#11](../../issues/11) | P0 |
-| 3 — Track C: ArgoCD export & GitOps audit | [#1](../../issues/1) | P1 |
-| 4 — Retention rules & failure alerting | [#2](../../issues/2) | P1 |
-| 5 — Full restore drill | [#12](../../issues/12) | P1 |
-| 6 — Close known gaps | [#3](../../issues/3) | P2 |
+| Phase | What it covers | How urgent | Issue |
+|-------|-----------------|------------|-------|
+| 0 — Get ready: S3 bucket, permissions, install a small tool | Highest | [#9](../../issues/9) |
+| 1 — Back up the server itself (files, database, certificates) | Highest | [#10](../../issues/10) |
+| 2 — Back up what's running inside K3s (apps, secrets, disks) with Velero | Highest | [#11](../../issues/11) |
+| 3 — Back up ArgoCD's own settings | Medium | [#1](../../issues/1) |
+| 4 — Auto-delete old backups + alert us on failure | Medium | [#2](../../issues/2) |
+| 5 — Actually test a full restore | Medium | [#12](../../issues/12) |
+| 6 — Fix the smaller unknowns | Low | [#3](../../issues/3) |
 
-### Gaps
+### Known unknowns (gaps)
 
-| Gap | Issue | Priority |
-|-----|-------|----------|
-| Backups contain plaintext Secrets; bucket must be SSE-KMS encrypted | [#14](../../issues/14) | **P0** |
-| Ingress TLS certificate source unverified | [#4](../../issues/4) | P1 |
-| Node-level OS config not captured | [#5](../../issues/5) | P1 |
-| `server/tls/` and `server/cred/` never enumerated | [#8](../../issues/8) | P1 |
-| ~~Hosting provider unconfirmed~~ → Datalix, on-premise, **no snapshot fallback** | [#13](../../issues/13) | ✅ Resolved |
-| OS package list not captured | [#6](../../issues/6) | P2 |
-| Single-region S3, no replication | [#15](../../issues/15) | P2 |
-| Keep DR docs in Git, never only on the server | [#7](../../issues/7) | P2 |
-| No owner for credential rotation | [#16](../../issues/16) | P2 |
+| What we don't know yet | How urgent | Issue |
+|------|------------|-------|
+| Backups will contain real secrets — the S3 bucket must be encrypted | **Highest** | [#14](../../issues/14) |
+| Where our HTTPS/SSL certificates actually come from | Medium | [#4](../../issues/4) |
+| The server's network/firewall/login settings aren't backed up yet | Medium | [#5](../../issues/5) |
+| Two specific certificate folders were never checked in detail | Medium | [#8](../../issues/8) |
+| We're not 100% sure who hosts this server | Low | [#13](../../issues/13) |
+| List of installed system software isn't saved anywhere | Low | [#6](../../issues/6) |
+| All backups sit in one AWS region only, no backup-of-the-backup | Low | [#15](../../issues/15) |
+| Keep this documentation in Git, never only on the server | Low | [#7](../../issues/7) |
+| Nobody is assigned to rotate backup passwords/keys regularly | Low | [#16](../../issues/16) |
 
-**Start here:** [#9](../../issues/9) → [#10](../../issues/10) / [#11](../../issues/11) → [#1](../../issues/1) → [#2](../../issues/2) → [#12](../../issues/12)
+**Where to start:** [#9](../../issues/9) → [#10](../../issues/10) / [#11](../../issues/11) →
+[#1](../../issues/1) → [#2](../../issues/2) → [#12](../../issues/12)
 
-Issues #9 and #10 have a command-by-command runbook: [07 — Phase 0 & 1 Execution](docs/07-phase-0-1-execution.md).
-
-## Cluster at a glance
+## Our server, in short
 
 ```text
-Host          k3-master
-OS            Ubuntu 24.04.3 LTS (Noble), kernel 6.8.0-137-generic, x86_64
-K3s           v1.34.5+k3s1
-Topology      Single node, control-plane only, no HA
-Datastore     SQLite  (embedded etcd DISABLED, no external datastore)
-Storage       local-path provisioner → /var/lib/rancher/k3s/storage
-GitOps        ArgoCD (SBE / COW workloads)
-Monitoring    Prometheus, Loki, Grafana, Alertmanager, MinIO
+Server name    k3-master
+Operating system   Ubuntu 24.04.3 LTS, 64-bit
+K3s version    v1.34.5+k3s1
+Setup          One single server (no backup server, no high-availability)
+Database       SQLite (built into K3s — no separate database server)
+Storage        Files saved to local disk under /var/lib/rancher/k3s/storage
+Deployments    ArgoCD watches Git and deploys our apps automatically
+Monitoring     Prometheus, Loki, Grafana, Alertmanager, MinIO
 ```
 
-## The single most important correction
+## The most important thing to understand
 
-`/etc/rancher/k3s` is **configuration**, not the cluster's identity. Full recovery requires
-`/var/lib/rancher/k3s/server/` as one unit — including `tls/` and `cred/`, which the original
-discovery pass did not capture. See [Backup Strategy §2](docs/02-backup-strategy.md#2-the-correction-that-changes-the-whole-plan).
+People sometimes assume `/etc/rancher/k3s` is "the cluster." It is not — it's just a config file
+that points somewhere else. The real identity of the cluster (its certificates, passwords, and
+database) lives in `/var/lib/rancher/k3s/server/`. If we lose that folder without a backup, we
+cannot cleanly bring the cluster back — every existing connection and login would need to be
+re-issued from scratch.
 
-## Working agreement
+**Rule:** always back up `/var/lib/rancher/k3s/server/` as one complete folder, including its
+`tls` and `cred` subfolders (some earlier notes forgot these two). See
+[Backup Strategy §2](docs/02-backup-strategy.md#2-the-correction-that-changes-the-whole-plan) for
+the full explanation.
 
-- This documentation **must not live only on `k3-master`** — it would disappear in exactly
-  the scenario it exists to solve. This repository is the canonical copy.
-- Backup scripts, once written, live in `scripts/` in this repo and are deployed from here.
-- Every phase in the TODO has a corresponding GitHub Issue. Close the issue, tick the doc.
+## Ground rules for this repo
+
+- **Never keep this documentation only on the server.** If the server dies, we'd lose the very
+  instructions we need to bring it back. This GitHub repo is the one true copy.
+- Backup scripts live in the `scripts/` folder here, and get copied onto the server from here —
+  not written directly on the server.
+- Every phase of work has a matching GitHub Issue. When the work is done: close the issue, and
+  tick the box in the TODO doc.
