@@ -12,19 +12,29 @@
 **Risk:** Zero — this only reads information, nothing gets changed
 **What to do:** Run these commands, and send me the output
 
+### Easiest way — run the preflight checker
+
+One command does almost all of Day 1 for you, and tells you exactly what's missing:
+
 ```bash
-# Check K3s version
-k3s --version
+# copy it across, then run it
+scp scripts/k3s-backup-preflight.sh root@45.90.98.51:/tmp/
+sudo install -m 0750 -o root -g root /tmp/k3s-backup-preflight.sh /usr/local/sbin/
 
-# Check how much disk space is free
-df -h /
+# AWS doesn't exist yet, so skip those checks for now
+sudo /usr/local/sbin/k3s-backup-preflight.sh --no-aws
+```
 
-# Check the certificate files
-sudo find /var/lib/rancher/k3s/server/tls -printf '%M %u:%g %10s %p\n' | sort -k4
+It prints a PASS/WARN/FAIL line for every check, a table of what's running in each namespace, and
+— importantly — **a list of anything that's missing, with the exact command to fix it.**
 
-sudo find /var/lib/rancher/k3s/server/cred -printf '%M %u:%g %10s %p\n' | sort -k4
+You'll see failures about the AWS config not existing yet. That's expected on Day 1; we create
+that on Day 2–3.
 
-# Check the Traefik ingress setup (this one matters!)
+### The remaining manual checks
+
+```bash
+# The Traefik ingress setup (this one matters — the preflight can't judge it for you)
 sudo k3s kubectl get ingressroute -A
 
 sudo k3s kubectl -n kube-system get deploy traefik -o yaml | grep -i acme
@@ -75,13 +85,22 @@ sudo nano /etc/k3s-backup/backup.env
 scp scripts/k3s-track-a-backup.sh root@45.90.98.51:/usr/local/sbin/
 scp scripts/systemd/* root@45.90.98.51:/etc/systemd/system/
 
-# 3. Do a test run (this builds the backup, but does NOT upload it anywhere)
+# 3. Re-run the preflight — now WITH the AWS checks, since the config exists
+#    This must come back READY before you go any further.
+sudo /usr/local/sbin/k3s-backup-preflight.sh
+
+# 4. Do a test run (this builds the backup, but does NOT upload it anywhere)
 #    DRY_RUN=1 is what skips the upload — without it, this really uploads for real.
 sudo DRY_RUN=1 /usr/local/sbin/k3s-track-a-backup.sh full
 
-# 4. Check what it created
+# 5. Check what it created
 ls -la /var/backups/k3s/*/
 ```
+
+> **Step 3 is the important one.** It does a real 64 MB upload to check the AWS login can handle
+> a file the size of our actual database. A small test file wouldn't catch the most likely
+> permission problem — see [#21](../../issues/21). If the preflight says NOT READY, fix what it
+> lists before doing anything else.
 
 ---
 
@@ -148,9 +167,9 @@ sudo -E aws s3 ls s3://k3-master-dr/ --recursive --human-readable | tail
 
 | Day | Where | Time needed | What happens |
 |-----|----------|------|----------------|
-| 1 | k3-master | 30 min | Run the check commands |
+| 1 | k3-master | 30 min | Run the preflight checker (`--no-aws`) |
 | 2–3 | AWS account | 1–2 hrs | Create the bucket + keys |
-| 4 | k3-master | 30 min | Install the script |
+| 4 | k3-master | 30 min | Install the script, re-run preflight **with** AWS |
 | 5–7 | k3-master | 30 min | Do the first real backup |
 | 8 | k3-master | 5 min | Turn on the automatic schedule |
 | 9+ | k3-master | daily | Keep an eye on it |
@@ -161,7 +180,10 @@ sudo -E aws s3 ls s3://k3-master-dr/ --recursive --human-readable | tail
 
 | Problem | How to fix it |
 |---------|-----|
+| Not sure what's missing | **Run the preflight** — it lists every problem with the exact fix command |
 | AWS login doesn't work | Day 2–3: double-check it in the AWS console |
+| Small uploads work, the database upload fails | Missing `kms:Decrypt` on the backup login — [#21](../../issues/21). The preflight catches this |
+| `AccessDenied` on *every* upload | `KMS_KEY_ID` is probably a bare key id instead of the full ARN — [#24](../../issues/24) |
 | Running low on disk space | Clean up old files under `/var/backups` |
 | Backup upload keeps failing | Check network connection and firewall rules |
 | The server dies | Restore from the AWS backup — see the [restore runbook](docs/03-restore-runbook.md) |
@@ -170,6 +192,11 @@ sudo -E aws s3 ls s3://k3-master-dr/ --recursive --human-readable | tail
 
 ## What to do next
 
-**Run the Day 1 commands on k3-master, and send me the output.**
+**Run the preflight checker on k3-master, and send me the output:**
 
-Once I see that, I'll give you the exact AWS commands to copy and paste (Day 2–3).
+```bash
+sudo /usr/local/sbin/k3s-backup-preflight.sh --no-aws
+```
+
+That single output tells us what's already fine, what's missing, and what's running in every
+namespace. Once I see it, I'll give you the exact AWS commands to copy and paste (Day 2–3).

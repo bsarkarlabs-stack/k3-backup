@@ -85,6 +85,65 @@ echo "$REGION / $BUCKET / $ACCOUNT_ID"
 
 ---
 
+## Stage A.0 — Run the preflight checker first `[node]`
+
+**Do this before anything else.** It's one command, it changes nothing, and it answers "is
+everything actually in place?" in about 30 seconds — instead of finding out halfway through
+Stage F.
+
+```bash
+sudo /usr/local/sbin/k3s-backup-preflight.sh
+```
+
+If you haven't copied it across yet:
+
+```bash
+scp scripts/k3s-backup-preflight.sh <user>@45.90.98.51:/tmp/
+sudo install -m 0750 -o root -g root /tmp/k3s-backup-preflight.sh /usr/local/sbin/
+```
+
+### What it checks
+
+| Section | What it confirms |
+|---------|------------------|
+| A — Tooling | `aws`, `tar`, `python3` + its sqlite module, `flock`, disk space, and that the K3s binary reports a version |
+| B — Config | `backup.env` exists, is `600 root:root`, has every required setting, and that `KMS_KEY_ID` is a full ARN and not a bare key id |
+| C — AWS | The login works, the bucket exists, public access is blocked, versioning is on, default encryption is SSE-KMS, the KMS key is reachable — **and it does a real 64 MB upload** |
+| D — K3s data | Every file the backup reads exists, the token permissions are right, and the database passes an integrity check (read-only) |
+| E — Namespaces | A table of what's actually running in every namespace, and which namespaces hold data on disk |
+| F — Coverage | A plain list of what today's backup does **not** recover |
+
+### Why the 64 MB upload matters
+
+Section C deliberately uploads a large file, not just a small one. A small upload is single-part
+and needs fewer permissions; anything over 8 MB becomes a **multi-part** upload, which is what our
+64 MB database backup actually uses. Testing only with a small file passes and hides the problem
+until the first real backup ([#21](../../issues/21)).
+
+### Reading the result
+
+| Exit | Meaning |
+|------|---------|
+| `0` — READY | Everything checks out. Go to Stage E's dry run |
+| `2` — READY, with warnings | Safe to proceed, but read the warnings — some mean a future failure would go unnoticed |
+| `1` — NOT READY | Blocking problems. **Don't run the backup script.** Every failure prints the exact command to fix it |
+
+### Useful options
+
+```bash
+sudo ./k3s-backup-preflight.sh --no-aws      # local checks only, before AWS exists
+sudo ./k3s-backup-preflight.sh --no-upload   # AWS checks without the 64 MB test upload
+```
+
+> Run this **before Stage C too**, with `--no-aws`. It'll tell you what's missing locally, so you
+> aren't creating AWS resources only to discover the server can't use them.
+
+> The test files it uploads land in `s3://<bucket>/_preflight/` with fixed names, so repeat runs
+> overwrite rather than pile up. The backup login can't delete (by design), so clear them with an
+> admin login when you're done, or let a lifecycle rule expire that prefix.
+
+---
+
 ## Stage A — Double-check everything still matches `[node]`
 
 Our whole plan is built on the facts in

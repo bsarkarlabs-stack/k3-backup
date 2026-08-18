@@ -10,6 +10,23 @@ apps from Git).
 > **This is a private repo.** It has server IP addresses, folder paths, and how our system is
 > laid out. It does **not** contain any passwords, tokens, or keys, and it never should.
 
+## Before you run anything
+
+```bash
+sudo /usr/local/sbin/k3s-backup-preflight.sh
+```
+
+[`scripts/k3s-backup-preflight.sh`](scripts/k3s-backup-preflight.sh) checks everything the backup
+depends on and **tells you what's missing before you run it**, with the exact command to fix each
+thing. It changes nothing — read-only against the cluster.
+
+It covers: required tools · the config file and its permissions · the S3 bucket, KMS key and login
+(**including a real 64 MB upload**, which is what catches the most likely permission problem) ·
+every file the backup reads · a namespace-by-namespace inventory · and a plain list of what today's
+backup does **not** recover.
+
+Exit `0` = ready, `2` = ready with warnings, `1` = don't run the backup yet.
+
 ## The one-line goal
 
 > If the server dies: get a fresh Ubuntu server → install the same version of K3s → restore our
