@@ -300,6 +300,15 @@ once** — that is the point of separating them.
 One bucket, prefixed by track and layer. **Lifecycle rules do the retention work** so nothing
 depends on a script remembering to delete old backups.
 
+| Setting | Value | Why |
+|---------|-------|-----|
+| Bucket | `k3-master-dr` | Globally unique names — add a suffix if taken |
+| Region | `ap-south-1` (Mumbai) by default | Any region works — ~320 MB/day makes latency a non-factor. Choose on cost and where the team sits. **Cannot be changed after creation.** See [07 Stage C.0](07-phase-0-1-execution.md#c0--pick-a-region-one-line-any-of-these-work). |
+| Encryption | SSE-KMS, customer-managed key | [Gap 5](05-gaps-and-open-questions.md#5-secrets-reach-s3-unencrypted-unless-sse-kms-is-configured) — load-bearing, not hardening |
+| Versioning | Enabled | Protects against bad overwrites and a compromised write credential |
+
+Created and verified in [07 — Phase 0 & 1 Execution, Stage C](07-phase-0-1-execution.md#stage-c--aws-foundations-local).
+
 ```text
 s3://k3-master-dr/
 ├── cluster-state/

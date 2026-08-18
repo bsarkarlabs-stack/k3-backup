@@ -5,7 +5,7 @@ away**. Each gap has a GitHub Issue.
 
 | # | Gap | Severity | Blocks | Issue |
 |---|-----|----------|--------|-------|
-| 1 | Hosting provider unconfirmed | Medium | Snapshot fallback planning | [#13](../../issues/13) |
+| 1 | ~~Hosting provider unconfirmed~~ → **Datalix, on-premise, no snapshot fallback** | ✅ Resolved — but raises severity elsewhere | — | [#13](../../issues/13) |
 | 2 | Ingress TLS certificate source unverified | **High** | Clean restore | [#4](../../issues/4) |
 | 3 | Node-level OS configuration not captured | **High** | Runbook step 2 | [#5](../../issues/5) |
 | 4 | OS package list not captured | Low | Fast parity on fresh server | [#6](../../issues/6) |
@@ -17,16 +17,29 @@ away**. Each gap has a GitHub Issue.
 
 ---
 
-## 1. Hosting provider unconfirmed
+## 1. Hosting provider — **RESOLVED: Datalix, treated as on-premise**
 
-The AWS EC2 metadata probe returned `AWS EC2 metadata not available`. The AWS CLI being installed
-does **not** imply the server runs on AWS.
+Confirmed by the operator. The server is hosted with **Datalix** on a public IP and is to be
+treated as an **on-premise / bare-metal** machine. **No hypervisor-level snapshot or provider
+backup is available.**
 
-**Why it matters:** no hypervisor-level snapshot fallback can be planned until the platform is
-known. A provider snapshot is not a substitute for this backup design, but it is a valuable
-extra layer — and it is free on some platforms.
+**Why this closes as a gap but makes everything else worse:**
 
-**To resolve:** identify the provider from billing, the control panel, or DMI/SMBIOS data.
+There is no fallback layer. On a cloud provider, a botched restore still leaves you a VM snapshot
+to roll back to. Here there is nothing behind the S3 backup set — it is the entire recovery
+story, not the first of two.
+
+Concretely, this raises the priority of three things:
+
+| Consequence | Where |
+|-------------|-------|
+| Phase 2 (Velero + PVC data) stops being "next" and becomes the thing standing between you and unrecoverable data loss | [04, Phase 2](04-implementation-todo.md#phase-2--kubernetes-level-backup-track-b) |
+| The restore drill is the only way you will ever find out whether recovery works, because there is no snapshot to fall back on when it doesn't | [04, Phase 5](04-implementation-todo.md#phase-5--restore-validation) |
+| Single-region S3 (gap 6) is now a *single copy of the only recovery path*, not a second copy | [gap 6](#6-single-region-s3-no-cross-region-replication) |
+
+> Hardware failure on an on-premise box also means **procurement time** is part of your RTO. A
+> cloud VM is replaced in minutes; a physical server may not be. Factor this into the RTO recorded
+> in Phase 5 — the restore procedure is only part of the outage.
 
 ---
 
@@ -102,10 +115,16 @@ retroactively apply to existing objects.
 
 ## 6. Single-region S3, no cross-region replication
 
-Reasonable given a single-node, no-HA cluster — the cluster itself is a larger single point of
-failure than the region.
+The original reasoning was: reasonable given a single-node, no-HA cluster — the cluster itself is a
+larger single point of failure than the region.
 
-**Why it matters:** it should be a **stated decision**, not a default nobody chose.
+**That reasoning is now weaker.** With [gap 1](#1-hosting-provider--resolved-datalix-treated-as-on-premise)
+resolved as *on-premise with no snapshot fallback*, the S3 bucket is not a second copy of your
+recovery path — it **is** your recovery path, in one region, in one account.
+
+**Why it matters:** it should be a **stated decision**, not a default nobody chose. The cheap
+middle ground, if full cross-region replication is overkill, is a periodic offline copy of the
+`cluster-state/` prefix pulled with the restore-reader credential and kept somewhere outside AWS.
 
 **To resolve:** decide explicitly in [Phase 6](04-implementation-todo.md#phase-6--close-known-gaps)
 and record the reasoning here.

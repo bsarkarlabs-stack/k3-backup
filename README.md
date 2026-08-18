@@ -21,6 +21,14 @@ single-node K3s cluster **`k3-master`**.
 | 04 | [Implementation TODO](docs/04-implementation-todo.md) | Phased build plan. Mirrored into GitHub Issues. |
 | 05 | [Gaps & Open Questions](docs/05-gaps-and-open-questions.md) | What discovery did not establish and must not be assumed. |
 | 06 | [Developer Access](docs/06-developer-access.md) | SSH deploy-key setup for cloning and pushing to this repo. |
+| 07 | [Phase 0 & 1 Execution Runbook](docs/07-phase-0-1-execution.md) | Copy-paste commands to build Phases 0 and 1 on the live server, with a per-stage downtime risk register, verification after every step, and rollback. |
+
+## Scripts
+
+| Path | Purpose |
+|------|---------|
+| [`scripts/k3s-track-a-backup.sh`](scripts/k3s-track-a-backup.sh) | Track A backup — SQLite online-backup snapshot, server identity, config, manifests, node OS config, image manifest. Read-only against K3s; never restarts it. |
+| [`scripts/systemd/`](scripts/systemd/) | `k3s-backup@.service` plus the 6-hourly `db` and daily `full` timers. |
 
 ## Current status
 
@@ -62,13 +70,15 @@ created out of order.
 | Ingress TLS certificate source unverified | [#4](../../issues/4) | P1 |
 | Node-level OS config not captured | [#5](../../issues/5) | P1 |
 | `server/tls/` and `server/cred/` never enumerated | [#8](../../issues/8) | P1 |
-| Hosting provider unconfirmed | [#13](../../issues/13) | P2 |
+| ~~Hosting provider unconfirmed~~ → Datalix, on-premise, **no snapshot fallback** | [#13](../../issues/13) | ✅ Resolved |
 | OS package list not captured | [#6](../../issues/6) | P2 |
 | Single-region S3, no replication | [#15](../../issues/15) | P2 |
 | Keep DR docs in Git, never only on the server | [#7](../../issues/7) | P2 |
 | No owner for credential rotation | [#16](../../issues/16) | P2 |
 
 **Start here:** [#9](../../issues/9) → [#10](../../issues/10) / [#11](../../issues/11) → [#1](../../issues/1) → [#2](../../issues/2) → [#12](../../issues/12)
+
+Issues #9 and #10 have a command-by-command runbook: [07 — Phase 0 & 1 Execution](docs/07-phase-0-1-execution.md).
 
 ## Cluster at a glance
 

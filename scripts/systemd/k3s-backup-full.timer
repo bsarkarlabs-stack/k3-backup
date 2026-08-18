@@ -1,0 +1,13 @@
+[Unit]
+Description=K3s full Track A backup, daily (components 1-4, 8 + node config)
+
+[Timer]
+Unit=k3s-backup@full.service
+# 02:15 UTC — offset from the 6-hourly db run so the flock is never contended.
+OnCalendar=*-*-* 02:15:00 UTC
+Persistent=true
+RandomizedDelaySec=600
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target

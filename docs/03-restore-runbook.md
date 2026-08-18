@@ -50,9 +50,13 @@ Match the original specification: 8 vCPU, 22 GiB RAM, comparable disk. Confirm a
 Hostname, network (static IP), UFW rules, SSH host keys, timezone / NTP — from the
 `node-config/` prefix.
 
-> ⚠️ **Gap:** this material is not yet captured by any backup job. See
-> [Gaps §3](05-gaps-and-open-questions.md#3-node-level-os-configuration-not-captured) — until
-> Phase 1 covers it, this step is manual reconstruction.
+> ✅ **Covered once Phase 1 is live.** The `node-config/` prefix now carries netplan, UFW rules and
+> config, `/etc/ssh` (including host keys), `authorized_keys`, timezone/NTP, `dpkg
+> --get-selections`, and the interface/route dump. See
+> [07 — Phase 0 & 1 Execution](07-phase-0-1-execution.md) and
+> [Gaps §3](05-gaps-and-open-questions.md#3-node-level-os-configuration-not-captured).
+>
+> Until the first `full` run has actually completed, this step is still manual reconstruction.
 
 **Verify:** `hostname` returns `k3-master`; expected IPs present on the interface.
 
@@ -87,7 +91,17 @@ Restore as **one unit** — this is the correction from
 ```
 
 **Verify:** `stat -c '%a %U:%G' /var/lib/rancher/k3s/server/token` → `600 root:root`.
-Confirm all three `state.db*` files are present, not just `state.db`.
+
+> ⚠️ **The backup format is a single consolidated `state.db`.** The diagram above describes the
+> *live* datastore. What Phase 1 uploads to `cluster-state/db/` is one file produced by the SQLite
+> online backup API, with the WAL already folded in — there is no `-wal` or `-shm` to restore.
+>
+> Place it as `/var/lib/rancher/k3s/server/db/state.db` with **no `-wal` and no `-shm` file beside
+> it**, while K3s is stopped. K3s creates fresh ones on start. Leaving a stale `-wal` from the old
+> machine next to a fresh snapshot is how a restore silently loads the wrong state.
+>
+> Verify the snapshot before you trust it:
+> `python3 -c "import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute('PRAGMA integrity_check').fetchone()[0])" state.db`
 
 > Before overwriting `manifests/`, diff `traefik-helmchartconfig.yaml` — it was hand-modified on
 > the original server.
@@ -107,6 +121,57 @@ If the systemd unit was restored, run `systemctl daemon-reload`.
 
 > `k3s.yaml` embeds the API server address. On a **migration** to a different IP, this must be
 > updated for local `kubectl` use.
+
+---
+
+## Step 5a — Only if the new host has a different IP or hostname
+
+Skip this entire step if the replacement machine keeps `45.90.98.51` and the hostname
+`k3-master`. If either changes, handle it **before** starting K3s in step 6.
+
+### Hostname
+
+Keep the hostname `k3-master` if you possibly can. The node's identity in the datastore is keyed
+on its name — boot with a different hostname and K3s registers a **second** Node object while the
+original sits there `NotReady`, with workloads pinned to a node that no longer exists.
+
+```bash
+sudo hostnamectl set-hostname k3-master
+```
+
+If the name genuinely must change, expect to delete the stale node afterwards:
+
+```bash
+kubectl get nodes                      # old name will show NotReady
+kubectl delete node <old-node-name>
+```
+
+### IP address
+
+The restored `tls/` directory contains the cluster **CA and its private key**, so K3s can and does
+mint fresh serving certificates for the new IP on startup. You do **not** need to regenerate the
+CA. What you do need to check:
+
+| Item | Action |
+|------|--------|
+| `/etc/rancher/k3s/k3s.yaml` | Points at `127.0.0.1:6443` by default — fine locally. Any copy used from a workstation needs the `server:` URL changed to the new IP. |
+| `--tls-san` flags | If `k3s.service` or a config file pins SANs to the old IP, update them before first start. |
+| DNS / ingress records | Repoint anything resolving to `45.90.98.51`. |
+| Services with `externalIPs` | `kubectl get svc -A -o wide \| grep 45.90.98.51` — these are hardcoded and will not self-heal. |
+| ArgoCD / monitoring URLs | Any ConfigMap or Application referencing the old IP rather than a DNS name. |
+| Firewall rules | Restored UFW rules from `node-config/` may reference the old subnet. |
+
+**Verify after step 6:**
+
+```bash
+kubectl get nodes -o wide              # exactly one node, Ready, correct IP
+kubectl get svc -A -o wide | grep -i 45.90.98.51    # expect no results
+sudo journalctl -u k3s | grep -i 'certificate\|x509' | tail
+```
+
+> ⚠️ If old kubeconfigs on other machines fail with an x509 error after the move, that is expected
+> — the *address* changed, not the CA. Update the `server:` URL in those kubeconfigs. Do **not**
+> "fix" it by regenerating certificates; that discards the identity you just restored.
 
 ---
 

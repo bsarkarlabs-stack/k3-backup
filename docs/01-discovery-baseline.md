@@ -340,15 +340,28 @@ file copy. See [Backup Strategy §3, component 1](02-backup-strategy.md#componen
 
 ---
 
-## 17. Hosting provider — **unconfirmed**
+## 17. Hosting provider — **Datalix, treated as on-premise**
 
 ```console
 $ curl http://169.254.169.254/latest/meta-data/instance-id
 AWS EC2 metadata not available
 ```
 
-The AWS CLI being installed does **not** imply the server runs on AWS. Hosting provider remains
-unidentified. S3 is still usable as a remote destination given credentials and egress.
+Confirmed by the operator: the server is hosted with **Datalix**, on a public IP, and is to be
+treated operationally as an **on-premise / bare-metal server**. The AWS CLI being installed does
+not imply the server runs on AWS — it does not.
+
+| Property | Value |
+|----------|-------|
+| Provider | Datalix |
+| Treat as | On-premise / bare metal |
+| Hypervisor snapshot fallback | **None available** |
+| S3 as a remote destination | Still valid — needs only credentials and outbound HTTPS |
+
+> ⚠️ **This is the most consequential fact in this document.** There is no provider-level snapshot,
+> no EBS volume backup, no console "restore VM" button. If this box is lost, the *only* path back
+> is the S3 backup set plus [03 — Restore Runbook](03-restore-runbook.md). Every "belt and
+> suspenders" assumption elsewhere in these docs should be read as absent here.
 
 ---
 
@@ -372,14 +385,14 @@ unidentified. S3 is still usable as a remote destination given credentials and e
 | ArgoCD health + applications | ✅ Complete |
 | Existing cron / snapshot backups | ✅ Checked — none |
 | Required CLI tooling | ✅ Complete |
-| **Hosting provider** | ⚠️ **Not confirmed** |
+| Hosting provider | ✅ Confirmed — Datalix, on-premise, no snapshot fallback |
 | **`server/tls/` contents** | ⚠️ **Not enumerated** |
 | **`server/cred/` contents** | ⚠️ **Not enumerated** |
 | **Node OS config** (netplan, UFW, SSH, NTP) | ⚠️ **Not captured** |
 | **Ingress TLS certificate source** | ⚠️ **Not determined** |
 | **OS package selections** | ⚠️ **Not captured** |
 
-The five ⚠️ items are tracked in [05 — Gaps & Open Questions](05-gaps-and-open-questions.md).
+The remaining ⚠️ items are tracked in [05 — Gaps & Open Questions](05-gaps-and-open-questions.md).
 
 ---
 

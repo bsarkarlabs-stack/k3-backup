@@ -1,0 +1,32 @@
+[Unit]
+Description=K3s Track A backup (%i)
+Documentation=https://github.com/bsarkarlabs-stack/k3-backup/blob/main/docs/02-backup-strategy.md
+# Ordering only. This does NOT prevent the backup running while k3s is down —
+# and that is intentional: a snapshot taken with k3s stopped is more consistent,
+# not less. What it does prevent is racing k3s during boot.
+After=k3s.service network-online.target
+Requires=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/k3s-backup/backup.env
+ExecStart=/usr/local/sbin/k3s-track-a-backup.sh %i
+
+# Never compete with the control plane for CPU or disk.
+Nice=10
+IOSchedulingClass=idle
+CPUSchedulingPolicy=batch
+
+# A stuck backup must not pile up behind the next timer firing.
+TimeoutStartSec=1800
+
+# Minimal hardening. NOT ProtectSystem/PrivateTmp-strict: the script must
+# read /var/lib/rancher/k3s and /etc, and write /var/backups/k3s.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=read-only
+RestrictSUIDSGID=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target
