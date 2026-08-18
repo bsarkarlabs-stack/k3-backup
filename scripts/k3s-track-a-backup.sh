@@ -7,6 +7,11 @@
 #   Usage:  k3s-track-a-backup.sh db     # datastore only              (every 6h)
 #           k3s-track-a-backup.sh full   # datastore + everything else (daily)
 #
+# Every run also writes a manifest to the run-manifests/ prefix recording the
+# k3s version and the sha256 of every artifact in that run. Start a restore by
+# reading the newest manifest — it names the binary version to install and the
+# exact object set that belongs together. See issue #17.
+#
 # Safety contract — this script must never cause cluster downtime:
 #   * It never starts, stops, restarts or reloads k3s.
 #   * It never writes inside /var/lib/rancher/k3s or /etc/rancher/k3s.
@@ -287,6 +292,103 @@ backup_image_manifest() {
 }
 
 # --------------------------------------------------------------------------
+# Run manifest  (issue #17)
+#
+# A restore needs the *matching* k3s binary version, and needs to know which
+# objects across six S3 prefixes belong to the same run. Nothing else in the
+# backup records either: uname is the kernel, dpkg selections do not list k3s
+# (it is a binary in /usr/local/bin), and every prefix carries its own
+# timestamp. Without this file the version is only ever written down in
+# markdown, which goes stale the first time k3s is upgraded.
+#
+# Written after checksum_all so it can carry each artifact's digest, and
+# registered afterwards so it uploads alongside them.
+# --------------------------------------------------------------------------
+
+write_manifest() {
+  local out="$STAGE/manifest-$RUN_TS.json"
+  local list="$STAGE/.manifest-input"
+  log "run manifest -> $(basename "$out")"
+
+  local k3s_version="unknown" k3s_raw=""
+  if [ -x "$K3S_BIN" ]; then
+    k3s_raw=$("$K3S_BIN" --version 2>/dev/null | tr '\n' ';' || true)
+    k3s_version=$(printf '%s\n' "$k3s_raw" | sed -n 's/.*k3s version \([^ ;]*\).*/\1/p')
+    [ -n "$k3s_version" ] || k3s_version="unknown"
+  fi
+  [ "$k3s_version" = "unknown" ] \
+    && log "  WARNING: could not determine k3s version — restore will have to guess"
+
+  : > "$list"
+  local entry file prefix
+  for entry in "${ARTIFACTS[@]}"; do
+    file=${entry%%|*}; prefix=${entry##*|}
+    printf '%s\t%s\t%s\t%s\n' \
+      "$prefix" "$(basename "$file")" \
+      "$(stat -c %s "$file")" \
+      "$(awk '{print $1}' "$file.sha256")" >> "$list"
+  done
+
+  MANIFEST_RUN_TS="$RUN_TS" \
+  MANIFEST_MODE="$MODE" \
+  MANIFEST_K3S_VERSION="$k3s_version" \
+  MANIFEST_K3S_RAW="$k3s_raw" \
+  MANIFEST_BUCKET="$S3_BUCKET" \
+  python3 - "$list" "$out" <<'PY'
+import json, os, platform, socket, sys
+
+list_path, out_path = sys.argv[1], sys.argv[2]
+
+artifacts = []
+with open(list_path) as fh:
+    for line in fh:
+        line = line.rstrip("\n")
+        if not line:
+            continue
+        prefix, name, size, sha = line.split("\t")
+        artifacts.append({"s3_prefix": prefix, "filename": name,
+                          "bytes": int(size), "sha256": sha})
+
+os_release = "unknown"
+try:
+    with open("/etc/os-release") as fh:
+        for line in fh:
+            if line.startswith("PRETTY_NAME="):
+                os_release = line.split("=", 1)[1].strip().strip('"')
+                break
+except OSError:
+    pass
+
+doc = {
+    "schema": "k3s-track-a-backup/manifest/v1",
+    "run_timestamp": os.environ["MANIFEST_RUN_TS"],
+    "mode": os.environ["MANIFEST_MODE"],
+    "hostname": socket.gethostname(),
+    "os_release": os_release,
+    "kernel": platform.release(),
+    "arch": platform.machine(),
+    "k3s_version": os.environ["MANIFEST_K3S_VERSION"],
+    "k3s_version_raw": os.environ.get("MANIFEST_K3S_RAW", "").strip().strip(";"),
+    "s3_bucket": os.environ["MANIFEST_BUCKET"],
+    "artifact_count": len(artifacts),
+    "artifacts": artifacts,
+}
+
+with open(out_path, "w") as fh:
+    json.dump(doc, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+
+print(f"    manifest: k3s={doc['k3s_version']} "
+      f"os={os_release} artifacts={len(artifacts)}")
+PY
+
+  rm -f "$list"
+  [ -s "$out" ] || die "run manifest is empty"
+  ( cd "$(dirname "$out")" && sha256sum "$(basename "$out")" > "$(basename "$out").sha256" )
+  register "$out" "run-manifests"
+}
+
+# --------------------------------------------------------------------------
 # Checksum + upload
 # --------------------------------------------------------------------------
 
@@ -360,6 +462,7 @@ if [ "$MODE" = "full" ]; then
 fi
 
 checksum_all
+write_manifest      # after checksum_all: the manifest carries every digest
 upload_all
 write_metric
 

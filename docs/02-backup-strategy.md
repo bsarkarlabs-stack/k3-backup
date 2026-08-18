@@ -319,8 +319,15 @@ s3://k3-master-dr/
 ├── velero/                  Velero-managed: resources + PVC data
 ├── argocd-export/           argocd admin export dumps
 ├── image-manifest/          image inventory, per run
-└── node-config/             netplan, ufw, ssh, systemd overrides
+├── node-config/             netplan, ufw, ssh, systemd overrides
+└── run-manifests/           per-run manifest.json — k3s version + artifact digests
 ```
+
+> **Start a restore from `run-manifests/`.** Each run writes a manifest recording the K3s version
+> that produced the snapshot plus the SHA-256 of every artifact in that run. Without it, the K3s
+> version exists only as prose in [01](01-discovery-baseline.md) — which goes stale the first time
+> K3s is upgraded — and assembling a consistent object set means comparing timestamps across seven
+> prefixes by hand. See [#17](../../issues/17).
 
 ### Retention matrix
 
@@ -332,6 +339,11 @@ s3://k3-master-dr/
 | ArgoCD export | daily | 14 daily | `argocd admin export` |
 | Image manifest | per run | 30 days | custom script |
 | Node config | weekly / on change | 4 copies | custom script |
+| Run manifests | per run | **keep as long as any artifact it describes** | custom script |
+
+> Run manifests are a few KB each. Expiring one earlier than the objects it describes would leave
+> those objects unidentifiable — set its lifecycle rule to outlive the longest-retained artifact,
+> not to a convenient round number.
 
 ### Bucket hygiene — not an afterthought
 

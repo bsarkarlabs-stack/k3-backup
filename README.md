@@ -76,6 +76,17 @@ created out of order.
 | Keep DR docs in Git, never only on the server | [#7](../../issues/7) | P2 |
 | No owner for credential rotation | [#16](../../issues/16) | P2 |
 
+### Review findings
+
+Raised from a K3s review of the Phase 1 script and docs.
+
+| Finding | Issue | Priority | State |
+|---------|-------|----------|-------|
+| Backup recorded no K3s version; added per-run `manifest.json` | [#17](../../issues/17) | **P0** | Fixed in repo, pending deploy |
+| Restore runbook assumed Velero / ArgoCD export that don't exist | [#18](../../issues/18) | P1 | Fixed |
+| K3s certificate expiry on restore undocumented | [#19](../../issues/19) | P1 | Fixed |
+| Decide: is `argocd admin export` required, or does Velero cover it? | [#20](../../issues/20) | P1 | **Open — your call** |
+
 **Start here:** [#9](../../issues/9) → [#10](../../issues/10) / [#11](../../issues/11) → [#1](../../issues/1) → [#2](../../issues/2) → [#12](../../issues/12)
 
 Issues #9 and #10 have a command-by-command runbook: [07 — Phase 0 & 1 Execution](docs/07-phase-0-1-execution.md).

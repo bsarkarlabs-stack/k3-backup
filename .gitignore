@@ -43,9 +43,10 @@ token
 .env.*
 *.local
 
-# Editor / OS noise
+# Editor / OS / tooling noise
 .vscode/
 .idea/
+.claude/settings.local.json
 *.swp
 .DS_Store
 Thumbs.db

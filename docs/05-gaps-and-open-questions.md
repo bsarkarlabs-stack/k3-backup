@@ -14,6 +14,78 @@ away**. Each gap has a GitHub Issue.
 | 7 | Documentation as a single point of failure | Medium | — *(resolved by this repo)* | [#7](../../issues/7) |
 | 8 | No named owner for credential rotation | Medium | Ongoing security posture | [#16](../../issues/16) |
 | 9 | `server/tls/` and `server/cred/` contents never enumerated | **High** | Restore confidence | [#8](../../issues/8) |
+| 10 | Backup recorded no K3s version, no consistent-set marker | **Critical** | Every restore | [#17](../../issues/17) |
+| 11 | Restore runbook assumes Velero / ArgoCD export that do not exist | **High** | Executable runbook | [#18](../../issues/18) |
+| 12 | K3s certificate expiry on restore undocumented | **High** | Restore confidence | [#19](../../issues/19) |
+| 13 | `argocd admin export` — required, or does Velero cover it? | Decision | Phase 3 scope | [#20](../../issues/20) |
+
+---
+
+## 10. Backup recorded no K3s version — **RESOLVED in repo, pending deployment**
+
+**Severity: Critical.** A restore needs the *matching* K3s binary, but nothing in the backup
+recorded which version produced a snapshot: `uname.txt` is the kernel, `dpkg-selections.txt` will
+not list K3s (a binary in `/usr/local/bin`, not a package), and no other artifact carried it. The
+version existed only as prose in [01](01-discovery-baseline.md) and [03](03-restore-runbook.md),
+kept current by someone remembering to edit markdown.
+
+Compounding it: `db` mode writes 4×/day and `full` 1×/day across seven prefixes with independent
+timestamps, and nothing declared which objects formed a coherent restore set.
+
+**Resolved by** `run-manifests/manifest-<TS>.json`, written on every run with the K3s version, OS
+release, architecture, and the SHA-256 of every artifact in that run.
+[Restore step 0](03-restore-runbook.md#step-0--read-the-run-manifest-first) now starts there.
+
+**Still open until** the updated script is deployed to `k3-master` and a manifest is confirmed in
+S3 — see [#17](../../issues/17).
+
+---
+
+## 11. Restore runbook assumed capability that does not exist
+
+**Severity: High.** [03](03-restore-runbook.md) steps 8 and 9 depended on Velero and a scheduled
+`argocd admin export`, neither of which is built. Step 11 asked the operator to verify Prometheus
+history that nothing backs up. An operator following it during an outage reached step 8 and
+stopped, cluster half-restored.
+
+**Resolved by** an explicit capability table at the top of the runbook, blocked-markers on steps 8
+and 9, and a *"valid today?"* column on the validation and scenario tables. This changed no scope —
+it stopped the document implying scope it did not have.
+
+**Removed when** [#11](../../issues/11) closes. Tracked as [#18](../../issues/18).
+
+---
+
+## 12. K3s certificate expiry on restore was undocumented
+
+**Severity: High.** K3s leaf certificates last ~1 year; the cluster CA ~10 years. K3s re-issues
+leaves from the CA at startup when they are near expiry — so restoring a backup older than roughly
+a year throws x509 errors that **self-heal**.
+
+**Why it mattered:** [03 step 6](03-restore-runbook.md#step-6--start-k3s-verify-node-health) said
+"if certificate errors appear, stop here." Correct for a real identity fault, but it would also
+halt a restore about to recover on its own — and invite someone to regenerate the CA, **discarding
+the identity they just restored**.
+
+**Resolved by** an expected-vs-broken table in step 6 and a "never regenerate the CA" warning.
+
+**Still to verify:** actual expiry dates on `k3-master` are captured in
+[07 Stage B.1](07-phase-0-1-execution.md#b1--enumerate-servertls-and-servercred-gap-9) but have not
+been read yet. Tracked as [#19](../../issues/19), ties to [#8](../../issues/8).
+
+---
+
+## 13. `argocd admin export` — required, or redundant with Velero?
+
+**Type: open decision, not a gap in coverage.** [#1](../../issues/1) and
+[02 component 9](02-backup-strategy.md#component-9--git--argocd-recoverability) require a daily
+export. A later proposal argued it is over-engineering because Velero backs up the `argocd`
+namespace anyway. Both positions are defensible; they cannot both drive the plan.
+
+**Deliberately unresolved.** It should be settled after [#11](../../issues/11) is built (so the
+Velero claim can be tested rather than assumed) and after the Phase 3 audit establishes whether any
+Applications were created ad hoc rather than via app-of-apps in Git. Tracked as
+[#20](../../issues/20).
 
 ---
 

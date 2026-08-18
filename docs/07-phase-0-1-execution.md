@@ -142,6 +142,32 @@ record it in [05](05-gaps-and-open-questions.md) and add it to the tar in Stage 
 sudo find /var/lib/rancher/k3s/server -maxdepth 1 -type f -printf '%M %10s %p\n'
 ```
 
+Record the certificate expiry dates while you are here ([#19](../../issues/19)). **Dates only —
+this reads no key material:**
+
+```bash
+for c in /var/lib/rancher/k3s/server/tls/*.crt; do
+  printf '%-58s ' "$(basename "$c")"
+  sudo openssl x509 -enddate -noout -in "$c" 2>/dev/null || echo "unreadable"
+done
+```
+
+**verify** — you expect two tiers, and the gap between them is the point:
+
+| Certificate | Expected lifetime |
+|-------------|-------------------|
+| `*-ca.crt` (server, client, request-header) | ~10 years out |
+| everything else (serving, client leaf certs) | ~1 year out |
+
+Write both dates into [01](01-discovery-baseline.md). They matter at restore time: a backup older
+than the **leaf** expiry produces x509 errors on first start that K3s **self-heals** by re-issuing
+from the still-valid CA. Knowing the real dates is what lets the operator tell that apart from a
+genuinely broken identity restore — see
+[03, step 6](03-restore-runbook.md#certificate-errors-expected-vs-genuinely-broken).
+
+> If any **CA** is inside ~1 year of expiry, stop and raise it. That is a live cluster problem, not
+> a backup problem, and it will not fix itself.
+
 ### B.2 — Determine the ingress TLS certificate source (gap 2)
 
 ```bash
@@ -640,9 +666,20 @@ You should see, for a `full` run:
 | `manifests-*.tar.gz` | ~20 KB |
 | `node-config-*.tar.gz` | small |
 | `images-*.txt`, `image-digests-*.txt` | a few KB |
+| `manifest-*.json` | a few KB |
 | a `.sha256` beside each | 100 bytes |
 
-And in the run output: `snapshot ok (read-only), integrity_check=ok`.
+And in the run output: `snapshot ok (read-only), integrity_check=ok`, followed by
+`manifest: k3s=v1.34.5+k3s1 os=... artifacts=N`.
+
+Check the manifest recorded a real version — this is what step 0 of a restore reads:
+
+```bash
+sudo python3 -m json.tool /var/backups/k3s/*/manifest-*.json | head -20
+```
+
+> If `k3s_version` says `unknown`, the script could not read `/usr/local/bin/k3s`. Fix that before
+> going further — a manifest without a version defeats the point of having one ([#17](../../issues/17)).
 
 > If the log says `WARNING: read-only open failed ... using query_only fallback`, the backup is
 > still safe — the connection is pinned read-only at the SQLite level — but note it, because it
@@ -696,7 +733,8 @@ sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/" --recursiv
 ```
 
 Expect objects under `cluster-state/db/`, `cluster-state/server-identity/`, `config/`,
-`manifests/`, `node-config/`, `image-manifest/` — each with its `.sha256` sibling.
+`manifests/`, `node-config/`, `image-manifest/` and `run-manifests/` — each with its `.sha256`
+sibling.
 
 Missing prefixes: `velero/` (Phase 2) and `argocd-export/` (Phase 3). That is correct at this
 stage.
@@ -731,6 +769,39 @@ LATEST=$(aws s3 ls "s3://$BUCKET/cluster-state/db/" | grep '\.db$' | sort | tail
 echo "$LATEST"
 aws s3 cp "s3://$BUCKET/cluster-state/db/$LATEST" .
 aws s3 cp "s3://$BUCKET/cluster-state/db/$LATEST.sha256" .
+```
+
+**verify — the run manifest is present and usable ([#17](../../issues/17))**
+
+This is what a real restore reads first, so prove it round-trips before you need it:
+
+```bash
+MAN=$(aws s3 ls "s3://$BUCKET/run-manifests/" | grep '\.json$' | sort | tail -1 | awk '{print $4}')
+aws s3 cp "s3://$BUCKET/run-manifests/$MAN" .
+python3 -m json.tool "$MAN"
+```
+
+Confirm it names a real `k3s_version` (not `unknown`), and that the digests it lists match the
+objects actually in the bucket:
+
+```bash
+python3 - "$MAN" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print("k3s_version :", d["k3s_version"])
+print("os_release  :", d["os_release"])
+print("mode        :", d["mode"], "  artifacts:", d["artifact_count"])
+assert d["k3s_version"] != "unknown", "manifest has no k3s version - fix before relying on this"
+for a in d["artifacts"]:
+    print(f"  {a['s3_prefix']:32} {a['filename']:40} {a['bytes']:>12,}")
+PY
+```
+
+Cross-check one digest end to end — the manifest's value must equal the downloaded file's:
+
+```bash
+grep -o '"sha256": "[a-f0-9]*"' "$MAN" | head -3
+sha256sum "$LATEST"
 ```
 
 **verify — checksum survived the round trip**
