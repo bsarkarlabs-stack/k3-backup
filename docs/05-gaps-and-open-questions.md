@@ -15,6 +15,13 @@ its own GitHub Issue to track it.
 | 7 | This documentation could be a single point of failure | Medium | — *(fixed by this repo existing)* | [#7](../../issues/7) |
 | 8 | Nobody's assigned to rotate backup passwords/keys | Medium | Keeping our security posture solid over time | [#16](../../issues/16) |
 | 9 | Two certificate folders were never checked file-by-file | **High** | Feeling confident our restore will actually work | [#8](../../issues/8) |
+| 10 | Backups didn't record which K3s version made them | **Critical** | Every single restore | [#17](../../issues/17) |
+| 11 | Restore runbook assumed tools we haven't built yet | **High** | Being able to follow the runbook at all | [#18](../../issues/18) |
+| 12 | Nobody wrote down how K3s certificates expire | **High** | Not panicking during a restore | [#19](../../issues/19) |
+| 13 | Do we actually need the ArgoCD settings export? | Decision | How much Phase 3 involves | [#20](../../issues/20) |
+
+> Items 10–12 came out of a K3s review of the backup script and docs. They're already fixed in
+> this repo; they stay listed here so the reasoning isn't lost.
 
 ---
 
@@ -170,6 +177,97 @@ that our backup script would accidentally miss.
 **How to close this out:** list what's inside both folders — **just the file names and
 permissions, never open or read the actual file contents** — and confirm our Phase 1 backup
 script would actually catch everything that's there.
+
+---
+
+## 10. Backups didn't record which K3s version made them — **fixed, waiting on deployment**
+
+**How serious: Critical.**
+
+A restore needs the *exact matching* K3s version. But nothing in our backup recorded which version
+produced it. We checked every file the script saves:
+
+| File we already save | Does it say the K3s version? |
+|----------------------|------------------------------|
+| `node-config/uname.txt` | No — that's the Linux kernel version, not K3s |
+| `node-config/dpkg-selections.txt` | No — K3s isn't installed as a system package, it's a plain program file |
+| `image-manifest/` | No — those are our app images, not K3s itself |
+| The database snapshot | No |
+
+So the version only existed as **text written in a document**, kept accurate by someone
+remembering to edit it. The moment we upgrade K3s, every older backup becomes a guess.
+
+There was a second half to this too: the database is backed up 4× a day while everything else is
+backed up once a day, across seven different folders with their own timestamps — and nothing said
+which files actually belonged together as one restorable set.
+
+**Fixed by** a new `run-manifests/manifest-<timestamp>.json` written on every run, recording the
+K3s version, the OS version, and the fingerprint of every file in that run.
+[Restore step 0](03-restore-runbook.md#step-0--open-the-run-manifest-first) now starts by reading it.
+
+**Not fully closed until** the updated script is actually deployed to `k3-master` and we've
+confirmed a manifest showing up in S3 — see [#17](../../issues/17).
+
+---
+
+## 11. The restore runbook assumed tools we haven't built yet
+
+**How serious: High.**
+
+Steps 8 and 9 of the [restore runbook](03-restore-runbook.md) told you to restore app data with
+Velero and import ArgoCD's settings — **neither of which exists yet**. Step 11 then asked you to
+confirm Prometheus history was present, when nothing backs that history up in the first place.
+
+**Why it mattered:** someone following the runbook during a genuine outage would get to step 8,
+find nothing to restore from, and be stuck with a half-rebuilt server and no stated way forward.
+
+**Fixed by** adding a plain "what this runbook can actually do today" table at the top, marking
+steps 8 and 9 as blocked, and adding a "can this pass today?" column to the checking tables. This
+didn't change *what we're building* — it stopped the document quietly implying we'd already built
+it.
+
+**Delete those warnings when** [#11](../../issues/11) is done. Tracked as [#18](../../issues/18).
+
+---
+
+## 12. Nobody wrote down how K3s certificates expire
+
+**How serious: High.**
+
+K3s's everyday certificates last about **a year**; the master certificate that issues them lasts
+about **ten years**. When K3s starts up and finds the short-lived ones expired, it quietly reissues
+them from the master certificate. So restoring a backup that's roughly a year old throws alarming
+certificate errors that **fix themselves**.
+
+**Why it mattered:** [step 6](03-restore-runbook.md#step-6--start-k3s-and-check-that-the-server-itself-is-healthy)
+said "if you see certificate errors, stop here." That's right for a genuine identity problem — but
+it would also halt a restore that was about to recover on its own, and tempt someone into
+regenerating certificates, which **throws away the cluster identity they just restored**.
+
+**Fixed by** a "normal kind vs. real problem" table in step 6, plus a hard warning never to
+regenerate the master certificate.
+
+**Still to check:** the actual expiry dates on `k3-master`. Stage B.1 of
+[07](07-phase-0-1-execution.md) now captures them, but nobody has run it yet. Tracked as
+[#19](../../issues/19), connected to [#8](../../issues/8).
+
+---
+
+## 13. Do we actually need the ArgoCD settings export?
+
+**This is an open decision, not a hole in our coverage.**
+
+Two of our own documents currently disagree. [#1](../../issues/1) and
+[02](02-backup-strategy.md) say a daily ArgoCD export is required, because Git doesn't hold
+ArgoCD's own settings. A later proposal argued it's unnecessary work, because Velero already backs
+up the whole ArgoCD section of the cluster.
+
+Both arguments are reasonable. They can't both be right about what we build.
+
+**Deliberately left undecided.** It should be settled *after* [#11](../../issues/11) exists (so we
+can actually test whether Velero really captures everything, rather than assuming) and after the
+Phase 3 audit tells us whether anyone created ArgoCD apps by hand instead of through Git. Tracked
+as [#20](../../issues/20).
 
 ---
 

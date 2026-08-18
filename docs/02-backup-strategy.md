@@ -326,8 +326,16 @@ s3://k3-master-dr/
 ├── velero/                  Everything Velero manages: apps + app data
 ├── argocd-export/           ArgoCD's exported settings
 ├── image-manifest/          List of container images in use, saved every run
-└── node-config/             Network settings, firewall rules, SSH, etc.
+├── node-config/             Network settings, firewall rules, SSH, etc.
+└── run-manifests/           Which K3s version made each backup + file fingerprints
 ```
+
+> **Always start a restore by looking in `run-manifests/`.** Every backup run drops a small file
+> there recording the K3s version that produced it, plus the fingerprint of every file in that
+> run. Without it, the K3s version only exists as text in
+> [01](01-discovery-baseline.md) — which goes stale the moment we upgrade K3s — and working out
+> which files belong together means comparing timestamps across seven folders by hand, during an
+> outage. See [#17](../../issues/17).
 
 ### How long we keep each type of backup
 
@@ -339,6 +347,12 @@ s3://k3-master-dr/
 | ArgoCD export | Every day | 14 days | `argocd admin export` |
 | Container image list | Every run | 30 days | Our own script |
 | Server OS settings | Weekly, or when changed | Last 4 copies | Our own script |
+| Run manifests | Every run | **At least as long as any file it describes** | Our own script |
+
+> Run manifests are only a few KB each. If we ever expired one *sooner* than the backup files it
+> describes, those files would become unidentifiable — we'd no longer know which K3s version they
+> came from. Set its lifecycle rule to outlive the longest-kept backup, not to whatever round
+> number looks tidy.
 
 ### Keeping the bucket itself secure — not optional, not an afterthought
 
@@ -371,6 +385,18 @@ There are two ways to actually make this work:
    is created, and it automatically tracks which files go where. ← This is the approach we use.
 2. Manually pre-create data volumes with the exact same names as before, ahead of time. ← Works,
    but fragile and manual — easy to get wrong.
+
+### One more thing that makes this worse: our storage deletes itself
+
+Our storage setup uses a reclaim policy of **`Delete`** (confirmed in
+[01 §9](01-discovery-baseline.md)). In plain terms: **the moment someone deletes a data volume
+request (a PVC), the actual files on disk are destroyed immediately.**
+
+There's no grace period, no orphaned copy left sitting around, no recycle bin to fish it back out
+of. This is why "someone accidentally deleted the wrong thing" is genuinely dangerous here, and
+why [#11](../../issues/11) (Velero) matters more than its priority label suggests — right now it
+is the *only* thing that would stand between an accidental `kubectl delete pvc` and permanent loss
+of that data.
 
 This is exactly why app data backup (item 6 above) goes through Velero instead of a simple
 copy-and-schedule script like items 1–4 do.

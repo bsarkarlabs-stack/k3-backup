@@ -153,6 +153,33 @@ folders that looks like it's part of the cluster's identity (a stray `.key`, `.c
 sudo find /var/lib/rancher/k3s/server -maxdepth 1 -type f -printf '%M %10s %p\n'
 ```
 
+While you're here, also write down **when the certificates expire** ([#19](../../issues/19)). This
+reads expiry dates only — it never opens any private key:
+
+```bash
+for c in /var/lib/rancher/k3s/server/tls/*.crt; do
+  printf '%-58s ' "$(basename "$c")"
+  sudo openssl x509 -enddate -noout -in "$c" 2>/dev/null || echo "couldn't read"
+done
+```
+
+**Check:** you should see two clear groups, and the gap between them is the whole point:
+
+| Certificate | How far out it should expire |
+|-------------|------------------------------|
+| Anything ending in `-ca.crt` (the master certificates) | Roughly **10 years** away |
+| Everything else (the everyday certificates) | Roughly **1 year** away |
+
+Write both dates into [01](01-discovery-baseline.md). They matter during a restore: if we ever
+restore a backup that's older than the *everyday* certificate expiry, K3s throws certificate errors
+on startup and then **fixes them itself**, reissuing from the still-valid master certificate.
+Knowing the real dates is what lets whoever's doing the restore tell that apart from a genuinely
+broken identity — see
+[03, step 6](03-restore-runbook.md#certificate-errors-the-normal-kind-vs-the-real-problem).
+
+> If any of the **master** certificates are within about a year of expiring, stop and raise it.
+> That's a problem with the live cluster, not with our backups, and it will not fix itself.
+
 ### B.2 — Find out where our HTTPS certificates actually come from (closes gap 2)
 
 ```bash
@@ -667,9 +694,21 @@ For a `full` run, you should see roughly these files:
 | `manifests-*.tar.gz` | ~20 KB |
 | `node-config-*.tar.gz` | small |
 | `images-*.txt`, `image-digests-*.txt` | a few KB |
+| `manifest-*.json` | a few KB |
 | a `.sha256` fingerprint file next to each one | ~100 bytes |
 
-And in the script's own output, you should see: `snapshot ok (read-only), integrity_check=ok`.
+And in the script's own output, you should see: `snapshot ok (read-only), integrity_check=ok`,
+followed by a line like `manifest: k3s=v1.34.5+k3s1 os=... artifacts=7`.
+
+Check the manifest actually recorded a real version — this is the file a restore reads first:
+
+```bash
+sudo python3 -m json.tool /var/backups/k3s/*/manifest-*.json | head -20
+```
+
+> If `k3s_version` says `unknown`, the script couldn't read `/usr/local/bin/k3s`. Fix that before
+> going any further — a manifest without a version defeats the entire point of having one
+> ([#17](../../issues/17)).
 
 > If you instead see `WARNING: read-only open failed ... using query_only fallback`, the backup
 > is still safe — the connection is still locked to read-only at the database level — but make a
@@ -725,8 +764,8 @@ sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/" --recursiv
 ```
 
 You should see files under `cluster-state/db/`, `cluster-state/server-identity/`, `config/`,
-`manifests/`, `node-config/`, and `image-manifest/` — each one with a matching `.sha256`
-fingerprint file next to it.
+`manifests/`, `node-config/`, `image-manifest/`, and `run-manifests/` — each one with a matching
+`.sha256` fingerprint file next to it.
 
 Folders you *won't* see yet: `velero/` (that's Phase 2) and `argocd-export/` (that's Phase 3).
 That's expected at this stage.
@@ -764,6 +803,40 @@ LATEST=$(aws s3 ls "s3://$BUCKET/cluster-state/db/" | grep '\.db$' | sort | tail
 echo "$LATEST"
 aws s3 cp "s3://$BUCKET/cluster-state/db/$LATEST" .
 aws s3 cp "s3://$BUCKET/cluster-state/db/$LATEST.sha256" .
+```
+
+**Check the run manifest is there and usable ([#17](../../issues/17))**
+
+This is the file a real restore opens first, so let's prove it works *before* we need it:
+
+```bash
+MAN=$(aws s3 ls "s3://$BUCKET/run-manifests/" | grep '\.json$' | sort | tail -1 | awk '{print $4}')
+aws s3 cp "s3://$BUCKET/run-manifests/$MAN" .
+python3 -m json.tool "$MAN"
+```
+
+Confirm it names a real K3s version (not `unknown`), and lists the files we'd expect:
+
+```bash
+python3 - "$MAN" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print("K3s version :", d["k3s_version"])
+print("OS          :", d["os_release"])
+print("Backup type :", d["mode"], "  files:", d["artifact_count"])
+assert d["k3s_version"] != "unknown", \
+    "manifest has no K3s version - fix this before relying on these backups"
+for a in d["artifacts"]:
+    print(f"  {a['s3_prefix']:32} {a['filename']:40} {a['bytes']:>12,}")
+PY
+```
+
+Finally, cross-check one fingerprint end to end — the value inside the manifest must match the
+file we actually downloaded:
+
+```bash
+grep -o '"sha256": "[a-f0-9]*"' "$MAN" | head -3
+sha256sum "$LATEST"
 ```
 
 **Check — the fingerprint should still match after downloading:**

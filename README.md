@@ -71,6 +71,17 @@ they were created at different times.)
 | Keep this documentation in Git, never only on the server | Low | [#7](../../issues/7) |
 | Nobody is assigned to rotate backup passwords/keys regularly | Low | [#16](../../issues/16) |
 
+### Things a K3s review turned up
+
+Found by reviewing the backup script and docs against how K3s actually behaves.
+
+| What was wrong | How urgent | Issue | Where it stands |
+|----------------|------------|-------|-----------------|
+| Backups never recorded which K3s version made them — so a restore had to guess | **Highest** | [#17](../../issues/17) | Fixed in this repo, still needs deploying to the server |
+| The restore runbook told you to use tools we haven't built yet | Medium | [#18](../../issues/18) | Fixed |
+| Nobody had written down that K3s certificate errors after a restore usually fix themselves | Medium | [#19](../../issues/19) | Fixed |
+| Do we actually need the ArgoCD settings export, or does Velero cover it? | Medium | [#20](../../issues/20) | **Open — needs a decision** |
+
 **Where to start:** [#9](../../issues/9) → [#10](../../issues/10) / [#11](../../issues/11) →
 [#1](../../issues/1) → [#2](../../issues/2) → [#12](../../issues/12)
 

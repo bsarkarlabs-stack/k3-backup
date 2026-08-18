@@ -11,6 +11,41 @@ reorder anything.
 
 ---
 
+## What this runbook can actually do today
+
+Read this bit first. Only part of our backup system is built so far, and a couple of the steps
+below need pieces that **don't exist yet**. Finding that out at step 8 in the middle of a real
+outage is exactly what this section is here to prevent. Tracked as [#18](../../issues/18).
+
+**✅ What we can genuinely recover right now:**
+
+| We get back | From which backup folder |
+|-------------|--------------------------|
+| The K3s database (the whole cluster's state) | `cluster-state/db/` |
+| The cluster's identity — certificates, join key, token | `cluster-state/server-identity/` |
+| K3s's own settings and service file | `config/` |
+| K3s's built-in setup files (DNS, Traefik, metrics) | `manifests/` |
+| The server's OS settings — network, firewall, SSH, packages | `node-config/` |
+| Which container images to pull | `image-manifest/` |
+| Which K3s version to install, and which files belong together | `run-manifests/` |
+
+**❌ What we cannot recover right now:**
+
+| What's missing | What that means in practice | Waiting on |
+|----------------|------------------------------|------------|
+| **App data volumes** — Prometheus, Loki, Grafana, Alertmanager | **Nothing at all backs up our ~7.8 GB of monitoring history.** A restore brings the monitoring stack back completely empty. | [#11](../../issues/11) |
+| Restoring one single object | Can't put back one accidentally deleted Deployment or Secret — the only option is rolling the entire database back, which undoes *everything* | [#11](../../issues/11) |
+| Restoring into a fresh/different cluster | Our database backup only helps when rebuilding **this same server** at **this same K3s version** | [#11](../../issues/11) |
+| ArgoCD's own settings export | ArgoCD only comes back via the restored database | [#1](../../issues/1), [#20](../../issues/20) |
+
+> **In one sentence:** today we can rebuild **this server**. We cannot yet restore into a fresh
+> cluster, and we will not get our monitoring history back. Steps 8 and 9 are marked as blocked
+> below so nobody gets stuck on them mid-outage.
+
+Delete this whole section once [#11](../../issues/11) is done.
+
+---
+
 ## Before you start
 
 | Thing you need | Details |
@@ -18,12 +53,41 @@ reorder anything.
 | A read-only backup login | The S3 read-only login, kept **offline** somewhere safe — not the login that was on the broken server |
 | A matching new server | 8 CPU cores, 22 GB RAM, at least 97 GB disk, 64-bit |
 | Operating system | Ubuntu 24.04 LTS |
-| K3s version | **`v1.34.5+k3s1`** — this exact version, nothing newer |
-| Which backup to use | Find the most recent set of backups where every piece is from around the same time, and note that timestamp |
+| K3s version | **Don't guess — read it out of the run manifest.** It was `v1.34.5+k3s1` when this doc was written |
+| Which backup to use | The run manifest tells you. Don't try to match up timestamps by eye |
 
-> **Check the backup's fingerprint (checksum) before restoring anything.** Every backup file has
-> a saved SHA-256 fingerprint. Restoring from a corrupted file would waste precious time during
-> an actual outage.
+### Step 0 — Open the run manifest first
+
+Every backup run writes a small file called `run-manifests/manifest-<timestamp>.json`. It records
+**which K3s version made that backup** and the fingerprint of every file in that run
+([#17](../../issues/17)). **Start here** — it removes the two things you'd otherwise have to guess
+at while the server is down.
+
+```bash
+aws s3 ls "s3://$BUCKET/run-manifests/" | sort | tail -5
+
+LATEST=$(aws s3 ls "s3://$BUCKET/run-manifests/" | grep '\.json$' | sort | tail -1 | awk '{print $4}')
+aws s3 cp "s3://$BUCKET/run-manifests/$LATEST" .
+python3 -m json.tool "$LATEST"
+```
+
+What to take from it:
+
+- **`k3s_version`** — the exact version to install in step 3. Use this, **not** the version number
+  written in this document. Docs go out of date; the manifest is written by the backup itself.
+- **`os_release`** and **`arch`** — what kind of server to set up in step 1.
+- **`artifacts`** — the exact file names, folders and fingerprints belonging to this one run.
+- **`mode`** — `full` means everything was backed up; `db` means database only. For a complete
+  rebuild you want the newest `full`, plus a newer `db` snapshot if one exists.
+
+> If `k3s_version` says `unknown`, the backup ran at a moment when it couldn't read the K3s
+> program. Fall back to [01 — Discovery Baseline](01-discovery-baseline.md) and treat the version
+> as unconfirmed.
+
+> **Check every file's fingerprint (checksum) before restoring anything.** Compare each downloaded
+> file against the fingerprint listed **in the manifest**, not just its own `.sha256` file — the
+> manifest is what proves those files all came from the *same backup run*. Restoring from a
+> corrupted or mismatched file would waste precious time during an actual outage.
 
 ### Things that were already broken before we started — not restore failures
 
@@ -64,11 +128,13 @@ expect.
 
 ## Step 3 — Install K3s (matching version), but don't start it yet
 
-Install exactly version **`v1.34.5+k3s1`** — nothing newer, nothing older.
+Install exactly the version shown as **`k3s_version` in the manifest you opened in step 0** — it
+was `v1.34.5+k3s1` when this document was written, but the manifest is the real answer.
 
 > Using a different K3s version than what made the backup is the fastest way to turn a simple
 > restore into a confusing debugging session. Don't let the installer just grab "whatever's
-> latest" — pin the exact version.
+> latest" — pin the exact version. And trust the manifest over any version number written in a
+> document, including this one.
 
 Install it, then **immediately stop the service** — we need to put our backed-up database in
 place before K3s ever gets a chance to write anything new to it.
@@ -118,6 +184,60 @@ If we restored the systemd service file, run `systemctl daemon-reload` afterward
 
 ---
 
+## Step 5a — Only if the new server has a different IP or hostname
+
+**Skip this entire step** if the replacement machine keeps the same address (`45.90.98.51`) and
+the same hostname (`k3-master`). If either one changes, deal with it **now**, before starting K3s
+in step 6.
+
+### Hostname
+
+Keep the hostname as `k3-master` if there's any way to do so. K3s identifies the server by its
+name inside the database — so if it boots up with a different name, K3s registers it as a
+**brand new second server**, while the original entry sits there marked `NotReady` with all our
+apps still assigned to a machine that no longer exists.
+
+```bash
+sudo hostnamectl set-hostname k3-master
+```
+
+If the name genuinely has to change, expect to clean up the old entry afterwards:
+
+```bash
+kubectl get nodes                      # the old name will show as NotReady
+kubectl delete node <old-node-name>
+```
+
+### IP address
+
+Good news: the `tls/` folder we restored contains the cluster's **master certificate and its
+private key**, so K3s can and does create fresh certificates for the new address automatically on
+startup. **We do not need to regenerate anything.** What we *do* need to check:
+
+| Thing to check | What to do about it |
+|------|--------|
+| `/etc/rancher/k3s/k3s.yaml` | Points at `127.0.0.1:6443` by default, which is fine on the server itself. Any copy used from a laptop needs its `server:` address updated. |
+| `--tls-san` settings | If `k3s.service` or a config file lists the **old** IP address here, update it **before** the first start — otherwise K3s issues certificates that don't match the new address. |
+| DNS / website records | Repoint anything currently resolving to `45.90.98.51`. |
+| Services with a hardcoded IP | Run `kubectl get svc -A -o wide \| grep 45.90.98.51` — anything listed here has the old address **written into it** and will **not** fix itself. |
+| ArgoCD / monitoring URLs | Any setting that references the old IP address directly instead of a DNS name. |
+| Firewall rules | The restored firewall rules from `node-config/` may still reference the old network. |
+
+**Check after step 6:**
+
+```bash
+kubectl get nodes -o wide                            # exactly one server, Ready, correct IP
+kubectl get svc -A -o wide | grep -i 45.90.98.51     # expect no results
+sudo journalctl -u k3s | grep -i 'certificate\|x509' | tail
+```
+
+> ⚠️ If old `kubectl` configs on other laptops start failing with certificate errors after the
+> move, **that's expected** — the *address* changed, not the certificate authority. Just update
+> the `server:` address in those config files. **Do not "fix" this by regenerating certificates**
+> — that throws away the cluster identity we just restored.
+
+---
+
 ## Step 6 — Start K3s, and check that the server itself is healthy
 
 **Check with:**
@@ -128,6 +248,38 @@ If we restored the systemd service file, run `systemctl daemon-reload` afterward
 > If the server shows as `NotReady`, or you see certificate errors, **stop here.** Don't move on
 > to the next steps — fixing app-level problems on top of a broken control plane just makes
 > everything harder to diagnose.
+
+### Certificate errors: the normal kind vs. the real problem
+
+Before treating a certificate error as a failed restore, work out which kind you're looking at
+([#19](../../issues/19)). Here's the background:
+
+K3s uses two tiers of certificate. The **master certificate** (the "CA") is valid for about **ten
+years**. All the everyday certificates it issues are valid for about **one year**. When K3s
+starts up and finds those one-year certificates are expired or nearly expired, it quietly issues
+fresh ones using the master certificate we restored.
+
+| What you're seeing | Which kind | What to do |
+|---------|-----------|------------|
+| Certificate/expiry errors on first start, from a backup roughly a year old or older | **Normal.** The master certificate is still valid and K3s is reissuing the short-lived ones. | Let it finish, restart K3s once, check again. It fixes itself. |
+| The errors are still there after a clean restart | **Real problem** | Go back to step 4 and confirm `tls/` and `cred/` actually restored properly |
+| The `cred/` folder is missing or empty | **Real problem** | The identity backup is incomplete — use an older backup set |
+| Old `kubectl` configs on other laptops fail after moving servers | **Normal** — the *address* changed, not the certificate | Update the `server:` address in those config files |
+
+> 🚨 **Never regenerate the master certificate just to make an error go away.** Doing that throws
+> away the cluster identity we just restored, breaks every existing `kubectl` config and every
+> machine that was registered with the cluster, and turns a recoverable situation into a complete
+> rebuild. Same warning as in [step 5a](#step-5a--only-if-the-new-server-has-a-different-ip-or-hostname).
+
+Handy check — this only reads **expiry dates**, never any private key material:
+
+```bash
+for c in /var/lib/rancher/k3s/server/tls/server-ca.crt \
+         /var/lib/rancher/k3s/server/tls/client-ca.crt \
+         /var/lib/rancher/k3s/server/tls/serving-kube-apiserver.crt; do
+  printf '%s\n  ' "$c"; sudo openssl x509 -enddate -noout -in "$c" 2>/dev/null || echo "not found"
+done
+```
 
 ---
 
@@ -141,6 +293,15 @@ COW app sections.
 ---
 
 ## Step 8 — Restore app data using Velero
+
+> 🚫 **BLOCKED — can't be done today.** Velero isn't installed and there is no Velero backup
+> sitting in S3 ([#11](../../issues/11)). **Our app data volumes are not backed up by anything at
+> all**, so there is genuinely nothing here to restore from. Skip ahead to step 10 — the
+> monitoring stack will come back up with empty storage.
+>
+> All Prometheus, Loki, Grafana and Alertmanager history from before the incident is **gone**.
+> Nothing in this runbook brings it back until [#11](../../issues/11) is built. Everything below
+> is how this step *will* work once it is.
 
 **This is not a plain file copy** — see
 [Backup Strategy §6](02-backup-strategy.md#6-the-persistent-volume-gotcha) for why.
@@ -159,8 +320,19 @@ under `/var/lib/rancher/k3s/storage/` should roughly match the original ~7.8 GB.
 
 ## Step 9 — Reinstall ArgoCD, then import its settings
 
-This brings back ArgoCD's Apps, Projects, Git login credentials, and any single-sign-on/permission
-settings. ArgoCD then reconnects to Git on its own and starts syncing.
+> 🚫 **BLOCKED as written — there's no export file to import.** Nothing currently runs a scheduled
+> ArgoCD settings export ([#1](../../issues/1)), so there's no file for this step to use.
+>
+> **What actually happens when rebuilding the same server:** ArgoCD's settings live inside the
+> database we restored back in step 4, so it should come back on its own. Just check it rather
+> than reinstalling anything.
+>
+> **On a genuinely fresh cluster** there's nothing to restore ArgoCD from at all — which is part
+> of why [#20](../../issues/20) is still open.
+
+Once the export exists, importing it brings back ArgoCD's Apps, Projects, Git login credentials,
+and any single-sign-on/permission settings. ArgoCD then reconnects to Git on its own and starts
+syncing.
 
 **Check with:** all seven of ArgoCD's core components should show as `Running`; running
 `argocd repo list` should show our Git repos as connected.
@@ -178,16 +350,19 @@ ArgoCD syncing them from Git. Nothing special needed here.
 
 ## Step 11 — Double-check everything
 
-| Check | What we expect to see |
-|-------|-------|
-| `argocd app list` | All our **real** apps Synced/Healthy (remember the already-broken ones listed above) |
-| Website/traffic routing | Reachable, and traffic routing correctly |
-| Grafana | Loads properly, dashboards are there, connected to its data sources |
-| Prometheus | Can run queries; **historical data is there** — this proves step 8 actually worked |
-| Loki | Log searches return results |
-| Alertmanager | Running, with its alert routes configured |
-| HTTPS certificates | Valid, no browser warnings on any of our websites |
-| `kubectl get pv,pvc -A` | All six data volumes show as `Bound` |
+| Check | What we expect to see | Can this pass today? |
+|-------|-------|----------------------|
+| `argocd app list` | All our **real** apps Synced/Healthy (remember the already-broken ones listed above) | ✅ |
+| Website/traffic routing | Reachable, and traffic routing correctly | ✅ |
+| HTTPS certificates | Valid, no browser warnings on any of our websites | ✅ |
+| `kubectl get pv,pvc -A` | All six data volumes show as `Bound` | ✅ — they'll be `Bound`, but **empty** until [#11](../../issues/11) |
+| Grafana | Loads properly, connected to its data sources | ⚠️ Dashboards only come back if they're stored as config; anything saved inside Grafana's own storage is gone |
+| Prometheus | Can run queries | ⚠️ **There will be no historical data.** That's expected right now — it is *not* a failed restore |
+| Loki | Service is healthy | ⚠️ Log searches won't return anything from before the incident |
+| Alertmanager | Running, with its alert routes configured | ⚠️ Any silences and alert history are lost |
+
+> The ⚠️ rows only become ✅ once [#11](../../issues/11) is built. Until then, an empty Prometheus
+> after a restore is the **expected** result — don't burn outage time trying to debug it.
 
 ---
 
@@ -209,12 +384,17 @@ the new server now.
 
 Not every incident needs all twelve steps.
 
-| What happened | Which steps you actually need |
-|----------|--------------|
-| Someone accidentally deleted a Kubernetes resource | Just restore that one object from Velero — no server-level work needed |
-| A bad app deployment went out | Revert it in Git + roll back in ArgoCD (this is step 10 territory) |
-| One data volume's data got lost | Just step 8, focused on that one volume |
-| The database got corrupted, but the server itself is fine | Steps 4 through 7 |
-| Certificates got lost, but the server itself is fine | Step 4 (just `tls/` and `cred/`) through step 6 |
-| ArgoCD got wiped out | Just step 9 |
-| **Complete server loss / moving to a new machine / full disaster** | **All twelve steps** |
+| What happened | Which steps you actually need | Possible today? |
+|----------|--------------|-----------------|
+| The database got corrupted, but the server itself is fine | Steps 4 through 7 | ✅ |
+| Certificates got lost, but the server itself is fine | Step 4 (just `tls/` and `cred/`) through step 6 | ✅ |
+| A bad app deployment went out | Revert it in Git + roll back in ArgoCD (step 10 territory) | ✅ — Git is the source of truth |
+| Moving to a new machine / full disaster | Steps 0 through 12 | ⚠️ Partly — the server rebuilds, **app data does not** |
+| Someone accidentally deleted a Kubernetes resource | Restore that one object from Velero — no server-level work | 🚫 [#11](../../issues/11). The only fallback is rolling the whole database back to an earlier snapshot, which undoes **everything else too** |
+| One data volume's data got lost | Just step 8, focused on that one volume | 🚫 [#11](../../issues/11) — **not recoverable today** |
+| ArgoCD got wiped out | Just step 9 | ⚠️ Comes back via the database on the same server; nothing to restore from on a fresh one |
+| **Complete server loss** | **Steps 0 through 12** | ⚠️ Partly — see the table at the top |
+
+> Those 🚫 rows are the strongest argument for doing [#11](../../issues/11) sooner rather than
+> later. Someone accidentally deleting a single Secret or Deployment is a **far** more common
+> incident than losing the whole server — and it's the one this runbook currently handles worst.
