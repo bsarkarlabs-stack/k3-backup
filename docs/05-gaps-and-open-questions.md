@@ -19,9 +19,14 @@ its own GitHub Issue to track it.
 | 11 | Restore runbook assumed tools we haven't built yet | **High** | Being able to follow the runbook at all | [#18](../../issues/18) |
 | 12 | Nobody wrote down how K3s certificates expire | **High** | Not panicking during a restore | [#19](../../issues/19) |
 | 13 | Do we actually need the ArgoCD settings export? | Decision | How much Phase 3 involves | [#20](../../issues/20) |
+| 14 | Backup login couldn't upload our 64 MB database file | **Critical** | The very first real backup | [#21](../../issues/21) |
+| 15 | Our "backup succeeded" signal may go nowhere | **High** | Phase 4 alerting working at all | [#22](../../issues/22) |
+| 16 | Is K3s encrypting Secrets inside its own database? | Medium | How critical `cred/` is | [#22](../../issues/22) |
 
-> Items 10–12 came out of a K3s review of the backup script and docs. They're already fixed in
-> this repo; they stay listed here so the reasoning isn't lost.
+> Items 10–12 and 14 came out of K3s reviews of the backup script and docs. They're already fixed
+> in this repo; they stay listed here so the reasoning isn't lost. Items 15 and 16 need a fact
+> that can only be checked on the server — both have read-only checks waiting in
+> [07 Stage B](07-phase-0-1-execution.md).
 
 ---
 
@@ -268,6 +273,67 @@ Both arguments are reasonable. They can't both be right about what we build.
 can actually test whether Velero really captures everything, rather than assuming) and after the
 Phase 3 audit tells us whether anyone created ArgoCD apps by hand instead of through Git. Tracked
 as [#20](../../issues/20).
+
+---
+
+## 14. The backup login couldn't upload our database file — **fixed**
+
+**How serious: Critical.** It would have failed the very first real backup.
+
+The login we create for the server was deliberately given no `kms:Decrypt` permission, on the
+reasoning that a backup only ever *writes*, so it should never be able to decrypt anything.
+
+That reasoning is appealing and wrong. Any file over 8 MB gets uploaded by `aws s3 cp` as a
+**multi-part** upload, and multi-part uploads to an encrypted bucket need `kms:Decrypt` too. Our
+database backup is about 64 MB — so **every single database upload would have failed** with
+`AccessDenied`.
+
+**What made it worse:** the connection test in Stage D uploaded a 50-byte text file. That's a
+single-part upload, so it would have **passed** — handing over a green light, with the real
+failure appearing later during the first genuine backup, disguised as an S3 permissions problem.
+
+**Fixed by** adding `kms:Decrypt` (scoped to just our one encryption key), and changing the Stage D
+test to upload a 64 MB file so it exercises the same path the real backup uses. The protections
+that actually matter — no delete permission, one key only, versioning on — are untouched. Tracked
+as [#21](../../issues/21).
+
+---
+
+## 15. Our "backup succeeded" signal may go nowhere
+
+**How serious: High.**
+
+The backup script reports success by writing a metric file into
+`/var/lib/node_exporter/textfile_collector` on the server. If that folder doesn't exist, the script
+quietly skips it and carries on.
+
+**Why it matters:** discovery never confirmed node-exporter is installed at all — it isn't in the
+monitoring list in [01](01-discovery-baseline.md). If it runs inside the cluster without that
+server folder mounted, the metric is written nowhere and read by nobody, and the alerting we're
+planning in [#2](../../issues/2) would be built on a hook that does nothing. **A backup that
+silently stopped running would stay silent** — exactly what the alerting exists to prevent.
+
+**How to close this out:** [07 Stage B.1b](07-phase-0-1-execution.md) now has a read-only check to
+find out what node-exporter actually is here. Worth considering either way: alerting on **how old
+the newest file in S3 is** would prove the backup actually *arrived*, rather than trusting the
+script's own opinion of itself. Tracked as [#22](../../issues/22).
+
+---
+
+## 16. Is K3s encrypting Secrets inside its own database?
+
+**How serious: Medium — this is about knowing, not about coverage.**
+
+K3s can optionally encrypt Kubernetes Secrets inside its own database. If that's switched on,
+there's a key file (`cred/encryption-config.json`) without which **every Secret in a restored
+database is unreadable**.
+
+**Either answer is fine.** We back up the whole `cred/` folder regardless, so the file is already
+covered. What changes is how loudly we flag it, and whether a restore needs to explicitly confirm
+that file landed before starting K3s.
+
+**How to close this out:** [07 Stage B.1a](07-phase-0-1-execution.md) now checks this, read-only,
+and the answer gets recorded in [01](01-discovery-baseline.md).
 
 ---
 

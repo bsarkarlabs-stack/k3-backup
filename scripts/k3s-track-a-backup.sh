@@ -49,6 +49,10 @@ set -euo pipefail
 
 ENV_FILE=${ENV_FILE:-/etc/k3s-backup/backup.env}
 STAGE_ROOT=${STAGE_ROOT:-/var/backups/k3s}
+# Timestamp of the most recent full run, so db-only runs can name the full run
+# they restore alongside (#23). A plain file at the staging root: the staging
+# cleanup only prunes directories, so this survives.
+LAST_FULL_FILE=$STAGE_ROOT/.last-full-run
 LOCK_FILE=/run/k3s-track-a-backup.lock
 MIN_FREE_MB=${MIN_FREE_MB:-2048}
 BACKUP_NODE_CONFIG=${BACKUP_NODE_CONFIG:-1}
@@ -88,6 +92,18 @@ set -a; . "$ENV_FILE"; set +a
 : "${AWS_REGION:?AWS_REGION not set in $ENV_FILE}"
 : "${KMS_KEY_ID:?KMS_KEY_ID not set in $ENV_FILE}"
 export AWS_REGION AWS_DEFAULT_REGION="$AWS_REGION"
+
+# KMS_KEY_ID must be the full ARN, not the bare key id. The bucket policy compares
+# the upload header against the ARN with StringNotEquals, so a bare id denies every
+# single upload with an AccessDenied that looks like an encryption fault rather than
+# a wrongly-formatted variable. Fail here instead, where the message is readable. (#24)
+case "$KMS_KEY_ID" in
+  arn:aws:kms:*) ;;
+  *) die "KMS_KEY_ID must be the full key ARN, not the key id.
+       got:      $KMS_KEY_ID
+       expected: arn:aws:kms:<region>:<account-id>:key/<uuid>
+       Fix it in $ENV_FILE. A bare key id makes the bucket policy reject every upload." ;;
+esac
 
 command -v aws     >/dev/null || die "aws CLI not found"
 command -v python3 >/dev/null || die "python3 not found (needed for the SQLite backup API)"
@@ -310,6 +326,23 @@ write_manifest() {
   local list="$STAGE/.manifest-input"
   log "run manifest -> $(basename "$out")"
 
+  # Which full run does this snapshot restore alongside? K3s keeps the cluster's
+  # bootstrap data inside the datastore, encrypted with the server token, so a
+  # restore always pairs a state.db with an identity archive. db runs happen 4x
+  # daily and full runs once, so the pairing is not obvious from timestamps —
+  # record it rather than making the operator infer it during an outage. (#23)
+  local pairs_with=""
+  if [ "$MODE" = "full" ]; then
+    pairs_with="$RUN_TS"
+    printf '%s\n' "$RUN_TS" > "$LAST_FULL_FILE"
+  elif [ -r "$LAST_FULL_FILE" ]; then
+    pairs_with=$(head -n1 "$LAST_FULL_FILE")
+  fi
+  if [ -z "$pairs_with" ]; then
+    pairs_with="unknown"
+    log "  WARNING: no previous full run recorded — restore will need one located by hand"
+  fi
+
   local k3s_version="unknown" k3s_raw=""
   if [ -x "$K3S_BIN" ]; then
     k3s_raw=$("$K3S_BIN" --version 2>/dev/null | tr '\n' ';' || true)
@@ -334,6 +367,7 @@ write_manifest() {
   MANIFEST_K3S_VERSION="$k3s_version" \
   MANIFEST_K3S_RAW="$k3s_raw" \
   MANIFEST_BUCKET="$S3_BUCKET" \
+  MANIFEST_PAIRS_WITH="$pairs_with" \
   python3 - "$list" "$out" <<'PY'
 import json, os, platform, socket, sys
 
@@ -370,6 +404,9 @@ doc = {
     "k3s_version": os.environ["MANIFEST_K3S_VERSION"],
     "k3s_version_raw": os.environ.get("MANIFEST_K3S_RAW", "").strip().strip(";"),
     "s3_bucket": os.environ["MANIFEST_BUCKET"],
+    # The full run whose identity/config/manifests restore alongside this
+    # snapshot. Equals run_timestamp on a full run. See issue #23.
+    "pairs_with_full_run": os.environ["MANIFEST_PAIRS_WITH"],
     "artifact_count": len(artifacts),
     "artifacts": artifacts,
 }
@@ -378,8 +415,8 @@ with open(out_path, "w") as fh:
     json.dump(doc, fh, indent=2, sort_keys=True)
     fh.write("\n")
 
-print(f"    manifest: k3s={doc['k3s_version']} "
-      f"os={os_release} artifacts={len(artifacts)}")
+print(f"    manifest: k3s={doc['k3s_version']} os={os_release} "
+      f"artifacts={len(artifacts)} pairs_with={doc['pairs_with_full_run']}")
 PY
 
   rm -f "$list"

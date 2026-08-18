@@ -180,6 +180,66 @@ broken identity — see
 > If any of the **master** certificates are within about a year of expiring, stop and raise it.
 > That's a problem with the live cluster, not with our backups, and it will not fix itself.
 
+### B.1a — Is secrets-encryption turned on? (read-only)
+
+K3s can optionally encrypt Kubernetes Secrets *inside* its own database. If that's switched on,
+there's a key file — `cred/encryption-config.json` — **without which every Secret in a restored
+database is unreadable**.
+
+```bash
+sudo ls -la /var/lib/rancher/k3s/server/cred/
+sudo k3s secrets-encrypt status 2>&1 | head -5
+```
+
+**Check:** we're only answering "is it on or off?"
+
+| What you see | What it means | What to do |
+|--------------|---------------|------------|
+| `Encryption Status: Enabled` | Secrets are encrypted in the database | Note it in [01](01-discovery-baseline.md). `cred/` becomes **the** most critical thing we back up — it's already covered by our Stage E backup, but a restore must confirm `encryption-config.json` is in place *before* starting K3s |
+| `Encryption Status: Disabled` | Secrets sit in the database as plain text | Note it. Our S3 bucket encryption and careful handling of `state.db` are then the *only* things protecting them |
+| Command not found / errors | Older or restricted setup | Just record whether `encryption-config.json` exists in the listing above |
+
+> Either answer is fine — we back up `cred/` completely regardless. This is about knowing how
+> loudly to flag it, and what a restore has to double-check.
+
+### B.1b — Does node-exporter actually exist, and where does it read from? ([#22](../../issues/22))
+
+Our backup script writes a "last successful backup" metric into a folder on the server:
+`/var/lib/node_exporter/textfile_collector`. If nothing is reading that folder, the metric is
+written into the void — and the alerting we're planning in Phase 4 would be built on something
+that silently does nothing.
+
+Discovery never confirmed node-exporter is even installed, so let's find out:
+
+```bash
+# is it running directly on the server?
+systemctl list-units --all --no-pager | grep -i node.exporter
+ls -la /var/lib/node_exporter/textfile_collector 2>&1 | head -3
+```
+
+```bash
+# or is it running inside the cluster?
+sudo k3s kubectl get ds,deploy -A | grep -i node-exporter
+```
+
+```bash
+# if it's in the cluster, does it mount a folder from the server for text files?
+sudo k3s kubectl get ds -A -o yaml 2>/dev/null \
+  | grep -i -A3 'textfile\|node-exporter' | head -30
+```
+
+**Check** — write down which of these is true:
+
+| What you find | What it means for alerting |
+|---------------|----------------------------|
+| Running on the server, with that folder present | Good. Confirm the exact folder and set `TEXTFILE_DIR` in `backup.env` explicitly rather than trusting our guessed default |
+| Running in the cluster, no server folder mounted | The metric goes nowhere. Phase 4 needs a different approach — see [#22](../../issues/22) |
+| Not installed at all | Same conclusion: the metric hook does nothing today |
+
+> Worth considering either way: instead of trusting the script to report its own success, we could
+> alert on **how old the newest file in S3 is**. That checks the backup genuinely *arrived*, not
+> just that the script thought it finished. Record your finding on [#22](../../issues/22).
+
 ### B.2 — Find out where our HTTPS certificates actually come from (closes gap 2)
 
 ```bash
@@ -465,9 +525,9 @@ cat > /tmp/k3-dr-writer-policy.json <<EOF
       "Resource": "arn:aws:s3:::$BUCKET/*"
     },
     {
-      "Sid": "UseTheDrKeyForEncryptOnly",
+      "Sid": "UseTheDrKeyForBackupUploads",
       "Effect": "Allow",
-      "Action": ["kms:Encrypt", "kms:GenerateDataKey", "kms:DescribeKey"],
+      "Action": ["kms:Encrypt", "kms:GenerateDataKey", "kms:Decrypt", "kms:DescribeKey"],
       "Resource": "$KEY_ARN"
     }
   ]
@@ -483,10 +543,25 @@ aws iam create-access-key --user-name k3-master-backup-writer \
   --query 'AccessKey.{Id:AccessKeyId,Secret:SecretAccessKey}' --output table
 ```
 
-> Notice this login deliberately has **no ability to delete files, and no ability to decrypt**.
-> A login that lives on a production server, and can only ever *add* encrypted files, is a login
-> that a hacked server can't use to destroy or read our existing backups. Deleting old backups on
-> a schedule is handled separately, by S3's own cleanup rules in Phase 4 — never by this login.
+> Notice this login deliberately has **no ability to delete files**. A login that lives on a
+> production server, and can only ever *add* files, is a login that a hacked server can't use to
+> destroy our existing backups. Deleting old backups on a schedule is handled separately, by S3's
+> own cleanup rules in Phase 4 — never by this login.
+
+> ⚠️ **Why `kms:Decrypt` is in that list, even though it looks wrong** ([#21](../../issues/21))
+>
+> It's tempting to leave `kms:Decrypt` out — "the backup only ever writes, so why let it decrypt?"
+> That breaks the backup, for a non-obvious reason.
+>
+> The `aws s3 cp` command automatically switches to a **multi-part upload** for anything over
+> 8 MB, and our database backup is around 64 MB. Multi-part uploads to an encrypted bucket need
+> `kms:Decrypt` as well as `kms:GenerateDataKey`. Without it, every database upload fails with
+> `AccessDenied` — an error that reads like an S3 permissions problem and sends you looking in
+> completely the wrong place.
+>
+> It also doesn't actually widen access: this login already has `s3:GetObject` above, so it could
+> read backups either way. The restrictions that genuinely matter — **no delete**, only this one
+> encryption key, and bucket versioning turned on — are all still in place.
 
 Save the access key ID and secret somewhere safe right now — the secret is only shown once. They
 go into `/etc/k3s-backup/backup.env` in Stage D, and nowhere else. **Never commit them to this
@@ -604,6 +679,42 @@ sudo -E aws s3api head-object --bucket "$S3_BUCKET" --key "_egress-test/k3-egres
 You should see `SSE: aws:kms` and your key's ARN. If it says `AES256` or nothing at all, the
 bucket's default encryption or its policy didn't apply properly — go back and fix C.5/C.6 before
 uploading anything real.
+
+#### Now repeat it with a *large* file — this part is not optional
+
+The test above uploaded about 50 bytes. That's a **single-part** upload, and it does **not**
+exercise the same code path our real backup uses ([#21](../../issues/21)).
+
+Anything over 8 MB is uploaded by `aws s3 cp` as a **multi-part** upload, which needs an extra
+permission (`kms:Decrypt`). Our database backup is around 64 MB, so it always takes that path. If
+we only ever tested with a tiny file, we'd get a green light here and then a confusing
+`AccessDenied` failure later at Stage F — during the first real backup.
+
+```bash
+# 64 MB of zeros, roughly the size of our real database backup
+dd if=/dev/zero of=/tmp/k3-egress-big.bin bs=1M count=64 status=none
+
+sudo -E aws s3 cp /tmp/k3-egress-big.bin "s3://$S3_BUCKET/_egress-test/" \
+  --sse aws:kms --sse-kms-key-id "$KMS_KEY_ID"
+```
+
+**Check:**
+
+```bash
+sudo -E aws s3api head-object --bucket "$S3_BUCKET" --key "_egress-test/k3-egress-big.bin" \
+  --query '{SSE:ServerSideEncryption,Size:ContentLength}'
+```
+
+Expect `SSE: aws:kms` and a size of `67108864`.
+
+> If **this** upload fails with `AccessDenied` while the small one succeeded, the cause is almost
+> certainly a missing `kms:Decrypt` in the backup login's permissions. Go back to
+> [C.7](#c7--create-the-least-privilege-login-that-lives-on-the-server) and confirm it's in the
+> list. This is exactly the failure this larger test exists to catch early.
+
+```bash
+rm -f /tmp/k3-egress-big.bin
+```
 
 Now let's confirm our safety limits actually work — **both of the following must fail:**
 
@@ -824,8 +935,11 @@ d = json.load(open(sys.argv[1]))
 print("K3s version :", d["k3s_version"])
 print("OS          :", d["os_release"])
 print("Backup type :", d["mode"], "  files:", d["artifact_count"])
+print("Pairs with  :", d["pairs_with_full_run"])
 assert d["k3s_version"] != "unknown", \
     "manifest has no K3s version - fix this before relying on these backups"
+assert d["pairs_with_full_run"] != "unknown", \
+    "manifest does not name a paired full run - run a full backup first"
 for a in d["artifacts"]:
     print(f"  {a['s3_prefix']:32} {a['filename']:40} {a['bytes']:>12,}")
 PY

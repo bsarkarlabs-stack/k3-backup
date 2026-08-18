@@ -81,6 +81,10 @@ Found by reviewing the backup script and docs against how K3s actually behaves.
 | The restore runbook told you to use tools we haven't built yet | Medium | [#18](../../issues/18) | Fixed |
 | Nobody had written down that K3s certificate errors after a restore usually fix themselves | Medium | [#19](../../issues/19) | Fixed |
 | Do we actually need the ArgoCD settings export, or does Velero cover it? | Medium | [#20](../../issues/20) | **Open — needs a decision** |
+| The backup login couldn't upload our 64 MB database — and the test wouldn't have caught it | **Highest** | [#21](../../issues/21) | Fixed |
+| Our "backup succeeded" signal may be written where nothing reads it | Medium | [#22](../../issues/22) | **Open — needs a check on the server** |
+| Database-only backups didn't say which full backup they pair with | Medium | [#23](../../issues/23) | Fixed |
+| A bare KMS key ID instead of the full ARN would deny every upload | Low | [#24](../../issues/24) | Fixed |
 
 **Where to start:** [#9](../../issues/9) → [#10](../../issues/10) / [#11](../../issues/11) →
 [#1](../../issues/1) → [#2](../../issues/2) → [#12](../../issues/12)

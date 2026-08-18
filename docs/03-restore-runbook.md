@@ -77,8 +77,21 @@ What to take from it:
   written in this document. Docs go out of date; the manifest is written by the backup itself.
 - **`os_release`** and **`arch`** — what kind of server to set up in step 1.
 - **`artifacts`** — the exact file names, folders and fingerprints belonging to this one run.
-- **`mode`** — `full` means everything was backed up; `db` means database only. For a complete
-  rebuild you want the newest `full`, plus a newer `db` snapshot if one exists.
+- **`mode`** — `full` means everything was backed up; `db` means database only.
+- **`pairs_with_full_run`** — **this is the one that saves you time.** The database is backed up
+  every 6 hours, but the certificates, config and setup files only once a day. This field names
+  the `full` run whose files go together with this database snapshot, so you're not comparing
+  timestamps across seven folders while the server is down.
+
+**So for a complete rebuild:** take the newest database snapshot, read its `pairs_with_full_run`,
+and pull the certificates, config, setup files and OS settings from **that** run.
+
+> Why they have to be paired at all: K3s stores the cluster's identity information *inside* its own
+> database, locked with the server token. So the database and the certificate archive are two
+> halves of the same thing, and the manifest is what tells you which halves match.
+
+> If `pairs_with_full_run` says `unknown`, that backup ran before any full backup had been taken.
+> Fall back to simply using the most recent `full` run available.
 
 > If `k3s_version` says `unknown`, the backup ran at a moment when it couldn't read the K3s
 > program. Fall back to [01 — Discovery Baseline](01-discovery-baseline.md) and treat the version
