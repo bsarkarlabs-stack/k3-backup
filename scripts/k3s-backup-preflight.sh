@@ -245,6 +245,49 @@ else
         warn "no bucket policy — the deny-unencrypted and deny-wrong-key guards are missing" \
              "# see docs/07 Stage C.6"
       fi
+
+      # ---- lifecycle rules: without these the bucket grows forever ------
+      LC=$(aws s3api get-bucket-lifecycle-configuration --bucket "$S3_BUCKET" \
+             --query 'Rules[].Filter.Prefix' --output text 2>/dev/null)
+      if [ -n "$LC" ]; then
+        pass "lifecycle rules are configured"
+
+        for p in cluster-state/db/6hourly/ cluster-state/db/daily/ \
+                 cluster-state/server-identity/ node-config/ run-manifests/; do
+          case " $LC " in
+            *" $p "*) : ;;
+            *) warn "no lifecycle rule covers $p — that folder will grow without limit" \
+                    "# see docs/07 Stage C.6a for the full rule set" ;;
+          esac
+        done
+
+        # run-manifests must outlive everything it describes
+        RM_DAYS=$(aws s3api get-bucket-lifecycle-configuration --bucket "$S3_BUCKET" \
+                    --query "Rules[?Filter.Prefix=='run-manifests/'].Expiration.Days | [0]" \
+                    --output text 2>/dev/null)
+        MAX_OTHER=$(aws s3api get-bucket-lifecycle-configuration --bucket "$S3_BUCKET" \
+                    --query "max(Rules[?Filter.Prefix!='run-manifests/' && Filter.Prefix!='_preflight/'].Expiration.Days)" \
+                    --output text 2>/dev/null)
+        if [ -n "$RM_DAYS" ] && [ "$RM_DAYS" != "None" ] \
+           && [ -n "$MAX_OTHER" ] && [ "$MAX_OTHER" != "None" ]; then
+          if [ "${RM_DAYS%.*}" -ge "${MAX_OTHER%.*}" ]; then
+            pass "run-manifests (${RM_DAYS%.*}d) outlives every other rule (${MAX_OTHER%.*}d)"
+          else
+            fail "run-manifests expires after ${RM_DAYS%.*} days but backups are kept ${MAX_OTHER%.*} days — surviving backups would become unidentifiable" \
+                 "# raise the run-manifests/ rule to at least ${MAX_OTHER%.*} days (docs/07 Stage C.6a)"
+          fi
+        fi
+
+        aws s3api get-bucket-lifecycle-configuration --bucket "$S3_BUCKET" \
+          --query "Rules[?AbortIncompleteMultipartUpload].ID" --output text 2>/dev/null \
+          | grep -q . \
+          && pass "stuck multipart uploads get cleaned up" \
+          || warn "no AbortIncompleteMultipartUpload rule — a failed 64 MB upload leaves chunks that cost money and don't show in 'aws s3 ls'" \
+                  "# see docs/07 Stage C.6a"
+      else
+        warn "NO lifecycle rules — nothing is ever deleted. At ~320 MB/day that is ~114 GB after a year, growing without limit" \
+             "# see docs/07 Stage C.6a for the rule set (keeps it at ~3.7 GB)"
+      fi
     else
       fail "bucket s3://$S3_BUCKET does not exist or is not reachable" \
            "# create it first — docs/07 Stage C.2:

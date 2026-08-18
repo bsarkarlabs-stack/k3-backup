@@ -560,6 +560,91 @@ aws s3api get-bucket-policy      --bucket "$BUCKET" --query Policy --output text
 All four blocking settings should say `true`; versioning should say `Enabled`; encryption should
 show `aws:kms` with your key's ARN; and the policy should be there.
 
+### C.6a — Retention rules, so the bucket doesn't grow forever
+
+Set these up **now**, while you're already in the bucket settings. Without them nothing is ever
+deleted, and versioning means even overwrites pile up — roughly 320 MB a day, about 114 GB after a
+year.
+
+Each rule is just *"delete N days after upload"*, applied to one folder. That's the only thing an
+S3 lifecycle rule can do — which is exactly why our backups are filed into separate folders per
+retention period.
+
+```bash
+cat > /tmp/k3-dr-lifecycle.json <<'EOF'
+{
+  "Rules": [
+    { "ID": "db-6hourly-7d",  "Status": "Enabled",
+      "Filter": { "Prefix": "cluster-state/db/6hourly/" },
+      "Expiration": { "Days": 7 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 1 } },
+
+    { "ID": "db-daily-30d",   "Status": "Enabled",
+      "Filter": { "Prefix": "cluster-state/db/daily/" },
+      "Expiration": { "Days": 30 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 1 } },
+
+    { "ID": "identity-30d",   "Status": "Enabled",
+      "Filter": { "Prefix": "cluster-state/server-identity/" },
+      "Expiration": { "Days": 30 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 1 } },
+
+    { "ID": "config-30d",     "Status": "Enabled",
+      "Filter": { "Prefix": "config/" },
+      "Expiration": { "Days": 30 } },
+
+    { "ID": "manifests-30d",  "Status": "Enabled",
+      "Filter": { "Prefix": "manifests/" },
+      "Expiration": { "Days": 30 } },
+
+    { "ID": "images-30d",     "Status": "Enabled",
+      "Filter": { "Prefix": "image-manifest/" },
+      "Expiration": { "Days": 30 } },
+
+    { "ID": "node-config-90d","Status": "Enabled",
+      "Filter": { "Prefix": "node-config/" },
+      "Expiration": { "Days": 90 } },
+
+    { "ID": "run-manifests-365d", "Status": "Enabled",
+      "Filter": { "Prefix": "run-manifests/" },
+      "Expiration": { "Days": 365 } },
+
+    { "ID": "preflight-tests-2d", "Status": "Enabled",
+      "Filter": { "Prefix": "_preflight/" },
+      "Expiration": { "Days": 2 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 1 } },
+
+    { "ID": "abort-stuck-uploads", "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "AbortIncompleteMultipartUpload": { "DaysAfterInitiation": 3 } }
+  ]
+}
+EOF
+
+aws s3api put-bucket-lifecycle-configuration \
+  --bucket "$BUCKET" --lifecycle-configuration file:///tmp/k3-dr-lifecycle.json
+
+rm -f /tmp/k3-dr-lifecycle.json
+```
+
+**Check:**
+
+```bash
+aws s3api get-bucket-lifecycle-configuration --bucket "$BUCKET" \
+  --query 'Rules[].{ID:ID,Prefix:Filter.Prefix,Days:Expiration.Days}' --output table
+```
+
+Three of those rules are worth understanding rather than just pasting:
+
+| Rule | Why it's there |
+|------|----------------|
+| `run-manifests-365d` | **The longest on purpose.** These record which K3s version made each backup. If they expired before the backups they describe, those backups become unidentifiable. Never shorten this below the others. |
+| `abort-stuck-uploads` | Our database upload is multi-part. If one dies halfway, the uploaded chunks sit there costing money and are invisible to `aws s3 ls`. This cleans them up. |
+| `NoncurrentVersionExpiration` | Versioning is on, so a same-name overwrite keeps the old copy forever. Our filenames have timestamps so this shouldn't normally trigger — it's a safety net. |
+
+> The `_preflight/` rule is what tidies up after the preflight checker's test uploads, since the
+> backup login can't delete them itself.
+
 ### C.7 — Create the least-privilege login that lives on the server
 
 ```bash
@@ -933,9 +1018,27 @@ something in it:**
 sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/" --recursive --human-readable
 ```
 
-You should see files under `cluster-state/db/`, `cluster-state/server-identity/`, `config/`,
-`manifests/`, `node-config/`, `image-manifest/`, and `run-manifests/` — each one with a matching
-`.sha256` fingerprint file next to it.
+Everything is filed in dated folders, so you'll see paths like
+`cluster-state/db/daily/2026/08/18/state-20260818T021500Z.db`.
+
+For a `full` run you should see files under all of these, each with a matching `.sha256`
+fingerprint file next to it:
+
+```text
+cluster-state/db/daily/YYYY/MM/DD/
+cluster-state/server-identity/YYYY/MM/DD/
+config/YYYY/MM/DD/
+manifests/YYYY/MM/DD/
+node-config/YYYY/MM/DD/
+image-manifest/YYYY/MM/DD/
+run-manifests/YYYY/MM/DD/
+```
+
+A `db` run writes only two of them — `cluster-state/db/6hourly/YYYY/MM/DD/` and
+`run-manifests/YYYY/MM/DD/`. That's correct, not a partial failure.
+
+> Note the database tier: the daily `full` run writes to `db/daily/`, and the 6-hourly runs write
+> to `db/6hourly/`. They're separate folders so each can have its own retention rule.
 
 Folders you *won't* see yet: `velero/` (that's Phase 2) and `argocd-export/` (that's Phase 3).
 That's expected at this stage.
@@ -969,10 +1072,13 @@ export AWS_SECRET_ACCESS_KEY=<reader secret>
 export AWS_DEFAULT_REGION="$REGION"
 mkdir -p ~/k3-restore-check && cd ~/k3-restore-check
 
-LATEST=$(aws s3 ls "s3://$BUCKET/cluster-state/db/" | grep '\.db$' | sort | tail -1 | awk '{print $4}')
-echo "$LATEST"
-aws s3 cp "s3://$BUCKET/cluster-state/db/$LATEST" .
-aws s3 cp "s3://$BUCKET/cluster-state/db/$LATEST.sha256" .
+# dated folders, so list with --recursive and take the full key
+DBKEY=$(aws s3 ls "s3://$BUCKET/cluster-state/db/" --recursive \
+          | grep '\.db$' | sort | tail -1 | awk '{print $4}')
+echo "$DBKEY"
+aws s3 cp "s3://$BUCKET/$DBKEY" .
+aws s3 cp "s3://$BUCKET/$DBKEY.sha256" .
+LATEST=$(basename "$DBKEY")
 ```
 
 **Check the run manifest is there and usable ([#17](../../issues/17))**
@@ -980,8 +1086,10 @@ aws s3 cp "s3://$BUCKET/cluster-state/db/$LATEST.sha256" .
 This is the file a real restore opens first, so let's prove it works *before* we need it:
 
 ```bash
-MAN=$(aws s3 ls "s3://$BUCKET/run-manifests/" | grep '\.json$' | sort | tail -1 | awk '{print $4}')
-aws s3 cp "s3://$BUCKET/run-manifests/$MAN" .
+MANKEY=$(aws s3 ls "s3://$BUCKET/run-manifests/" --recursive \
+           | grep '\.json$' | sort | tail -1 | awk '{print $4}')
+aws s3 cp "s3://$BUCKET/$MANKEY" .
+MAN=$(basename "$MANKEY")
 python3 -m json.tool "$MAN"
 ```
 

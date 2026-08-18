@@ -12,6 +12,20 @@
 # reading the newest manifest — it names the binary version to install and the
 # exact object set that belongs together. See issue #17.
 #
+# S3 layout — partitioned by date, datastore additionally split by tier so that
+# lifecycle rules can express different retention per tier:
+#
+#   cluster-state/db/6hourly/YYYY/MM/DD/    from `db` runs      keep ~7 days
+#   cluster-state/db/daily/YYYY/MM/DD/      from `full` runs    keep ~30 days
+#   cluster-state/server-identity/YYYY/MM/DD/
+#   config/YYYY/MM/DD/   manifests/YYYY/MM/DD/   node-config/YYYY/MM/DD/
+#   image-manifest/YYYY/MM/DD/
+#   run-manifests/YYYY/MM/DD/               keep LONGEST — see below
+#
+# run-manifests must outlive every file it describes. Expire them early and the
+# surviving backups become unidentifiable: nothing else records which k3s
+# version produced them. They are a few KB each, so keep them for a year.
+#
 # Safety contract — this script must never cause cluster downtime:
 #   * It never starts, stops, restarts or reloads k3s.
 #   * It never writes inside /var/lib/rancher/k3s or /etc/rancher/k3s.
@@ -122,6 +136,22 @@ STAGE="$STAGE_ROOT/$RUN_TS"
 mkdir -p "$STAGE"
 chmod 0700 "$STAGE_ROOT" "$STAGE"
 
+# S3 keys are partitioned by date, and the datastore is additionally split by
+# tier. Both exist so S3 lifecycle rules can express a real retention policy:
+# a rule can only say "expire N days after creation", so anything you want to
+# keep for a different length of time has to live under its own prefix.
+#
+#   cluster-state/db/6hourly/YYYY/MM/DD/   short window, high granularity
+#   cluster-state/db/daily/YYYY/MM/DD/     longer window, one per day
+#
+# The tier comes straight from $MODE — no "is it Sunday?" arithmetic, and no
+# second copy of the same bytes.
+#
+# Derived from RUN_TS rather than calling date again, so a run that starts at
+# 23:59:59 cannot land its files under two different days.
+DATE_PATH="${RUN_TS:0:4}/${RUN_TS:4:2}/${RUN_TS:6:2}"
+if [ "$MODE" = "full" ]; then DB_TIER=daily; else DB_TIER=6hourly; fi
+
 cleanup() {
   local rc=$?
   if [ "$rc" -eq 0 ] && [ "${KEEP_STAGE:-0}" != "1" ]; then
@@ -193,7 +223,7 @@ finally:
 PY
 
   [ -s "$out" ] || die "SQLite snapshot is empty"
-  register "$out" "cluster-state/db"
+  register "$out" "cluster-state/db/$DB_TIER/$DATE_PATH"
 }
 
 # --------------------------------------------------------------------------
@@ -207,7 +237,7 @@ backup_server_identity() {
       -C "$K3S_SERVER_DIR" tls cred token \
     || die "tar of server identity failed"
   chmod 0600 "$out"
-  register "$out" "cluster-state/server-identity"
+  register "$out" "cluster-state/server-identity/$DATE_PATH"
 }
 
 # --------------------------------------------------------------------------
@@ -222,7 +252,7 @@ backup_config() {
       etc/systemd/system/k3s.service \
     || die "tar of k3s config failed"
   chmod 0600 "$out"          # k3s.yaml embeds admin client certs
-  register "$out" "config"
+  register "$out" "config/$DATE_PATH"
 }
 
 # --------------------------------------------------------------------------
@@ -235,7 +265,7 @@ backup_manifests() {
   run_tar --warning=no-file-changed -czf "$out" \
       -C "$K3S_SERVER_DIR" manifests \
     || die "tar of static manifests failed"
-  register "$out" "manifests"
+  register "$out" "manifests/$DATE_PATH"
 }
 
 # --------------------------------------------------------------------------
@@ -276,7 +306,7 @@ backup_node_config() {
     || die "tar of node config failed"
   chmod 0600 "$out"
   rm -rf "$dir"
-  register "$out" "node-config"
+  register "$out" "node-config/$DATE_PATH"
 }
 
 # --------------------------------------------------------------------------
@@ -302,8 +332,8 @@ backup_image_manifest() {
     | sed '/^$/d' | sort -u > "$dig" || true
 
   log "  $(wc -l < "$out") unique image references"
-  register "$out" "image-manifest"
-  [ -s "$dig" ] && register "$dig" "image-manifest"
+  register "$out" "image-manifest/$DATE_PATH"
+  [ -s "$dig" ] && register "$dig" "image-manifest/$DATE_PATH"
   return 0
 }
 
@@ -422,7 +452,7 @@ PY
   rm -f "$list"
   [ -s "$out" ] || die "run manifest is empty"
   ( cd "$(dirname "$out")" && sha256sum "$(basename "$out")" > "$(basename "$out").sha256" )
-  register "$out" "run-manifests"
+  register "$out" "run-manifests/$DATE_PATH"
 }
 
 # --------------------------------------------------------------------------

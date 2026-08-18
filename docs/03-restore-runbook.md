@@ -63,13 +63,23 @@ Every backup run writes a small file called `run-manifests/manifest-<timestamp>.
 ([#17](../../issues/17)). **Start here** — it removes the two things you'd otherwise have to guess
 at while the server is down.
 
-```bash
-aws s3 ls "s3://$BUCKET/run-manifests/" | sort | tail -5
+Backups are filed in dated folders (`run-manifests/2026/08/18/...`), so use `--recursive` when
+listing — otherwise you'll just see year folders.
 
-LATEST=$(aws s3 ls "s3://$BUCKET/run-manifests/" | grep '\.json$' | sort | tail -1 | awk '{print $4}')
-aws s3 cp "s3://$BUCKET/run-manifests/$LATEST" .
-python3 -m json.tool "$LATEST"
+```bash
+# the five most recent runs
+aws s3 ls "s3://$BUCKET/run-manifests/" --recursive | sort | tail -5
+
+# grab the newest manifest
+KEY=$(aws s3 ls "s3://$BUCKET/run-manifests/" --recursive \
+        | grep '\.json$' | sort | tail -1 | awk '{print $4}')
+echo "$KEY"
+aws s3 cp "s3://$BUCKET/$KEY" ./manifest.json
+python3 -m json.tool manifest.json
 ```
+
+> The dated folders still sort correctly, because the date is in the path *and* in the filename —
+> so `sort | tail -1` reliably gives you the newest run.
 
 What to take from it:
 
@@ -85,6 +95,26 @@ What to take from it:
 
 **So for a complete rebuild:** take the newest database snapshot, read its `pairs_with_full_run`,
 and pull the certificates, config, setup files and OS settings from **that** run.
+
+Each entry under `artifacts` already carries its exact `s3_prefix`, so you don't have to work out
+any folder paths yourself — just join the prefix and the filename:
+
+```bash
+python3 - manifest.json <<'PY'
+import json
+d = json.load(open("manifest.json"))
+print(f"# k3s version to install: {d['k3s_version']}")
+print(f"# pairs with full run   : {d['pairs_with_full_run']}")
+for a in d["artifacts"]:
+    print(f"aws s3 cp s3://$BUCKET/{a['s3_prefix']}/{a['filename']} .")
+PY
+```
+
+That prints a ready-to-run download command for every file in the set.
+
+> **Which database tier?** The 6-hourly snapshots live under `cluster-state/db/6hourly/` and the
+> daily ones under `cluster-state/db/daily/`. For the freshest possible state take the newest from
+> `6hourly/`; to go back more than a week, only `daily/` will still have it.
 
 > Why they have to be paired at all: K3s stores the cluster's identity information *inside* its own
 > database, locked with the server token. So the database and the certificate archive are two

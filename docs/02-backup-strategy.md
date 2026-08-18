@@ -316,19 +316,42 @@ One S3 bucket, with folders (called "prefixes") separating each track and layer.
 automatic lifecycle rules to delete old backups on schedule**, so nothing depends on a script
 remembering to clean up after itself.
 
+Everything is filed **by date**, and the database is additionally split into two **tiers**. Both
+of those exist for one reason: an S3 lifecycle rule can only ever say *"delete this N days after
+it was created."* So anything we want to keep for a different length of time has to sit under its
+own separate folder.
+
 ```text
 s3://k3-master-dr/
 ├── cluster-state/
-│   ├── db/                  SQLite database snapshots, every 6 hours
-│   └── server-identity/     tls/, cred/, token — encrypted
-├── config/                  Copy of /etc/rancher/k3s
-├── manifests/               K3s's built-in setup files
-├── velero/                  Everything Velero manages: apps + app data
-├── argocd-export/           ArgoCD's exported settings
-├── image-manifest/          List of container images in use, saved every run
-├── node-config/             Network settings, firewall rules, SSH, etc.
-└── run-manifests/           Which K3s version made each backup + file fingerprints
+│   ├── db/
+│   │   ├── 6hourly/2026/08/18/    every-6-hours snapshots   keep 7 days
+│   │   └── daily/2026/08/18/      the once-a-day snapshot   keep 30 days
+│   └── server-identity/2026/08/18/    tls/, cred/, token    keep 30 days
+├── config/2026/08/18/             Copy of /etc/rancher/k3s  keep 30 days
+├── manifests/2026/08/18/          K3s's built-in setup files
+├── node-config/2026/08/18/        Network, firewall, SSH    keep 90 days
+├── image-manifest/2026/08/18/     Container images in use
+├── run-manifests/2026/08/18/      Which K3s version, which files  keep 365 days
+├── velero/                        Velero manages its own layout (Phase 2)
+└── argocd-export/                 ArgoCD's exported settings (Phase 3)
 ```
+
+**How the two database tiers get filled** — no clever date arithmetic involved. The script already
+knows whether it's doing a 6-hourly run or the daily full run, so it just uses that:
+
+| Run | Goes to | Kept for |
+|-----|---------|----------|
+| The 6-hourly database snapshot | `db/6hourly/` | 7 days |
+| The daily full backup's database snapshot | `db/daily/` | 30 days |
+
+That gives us **7 days where we can rewind to any 6-hour point, and 30 days where we can rewind to
+any day** — without storing the same file twice.
+
+> **Why not keep monthly copies too?** Restoring a 3-month-old cluster state is close to useless in
+> practice — by then every workload has changed. For a K3s database the realistic recovery window
+> is days, not months. If that ever changes, the date folders are already there, so adding a
+> `monthly/` tier later means adding one rule, not moving anything.
 
 > **Always start a restore by looking in `run-manifests/`.** Every backup run drops a small file
 > there recording the K3s version that produced it, plus the fingerprint of every file in that
@@ -339,20 +362,36 @@ s3://k3-master-dr/
 
 ### How long we keep each type of backup
 
-| What | How often we back it up | How long we keep copies | Tool used |
-|-------|-----------|-----------|------|
-| Database + server identity | Every 6 hours | 7 daily + 4 weekly + 3 monthly copies | Our own script |
-| Config + built-in setup files | Every day | 14 days | Our own script |
-| Kubernetes objects + app data | Every day | 14 daily + 8 weekly | Velero |
-| ArgoCD export | Every day | 14 days | `argocd admin export` |
-| Container image list | Every run | 30 days | Our own script |
-| Server OS settings | Weekly, or when changed | Last 4 copies | Our own script |
-| Run manifests | Every run | **At least as long as any file it describes** | Our own script |
+Every row below is a **single S3 lifecycle rule** on that folder — "delete N days after upload".
+Nothing depends on a script remembering to clean up, and nothing needs delete permission on the
+server (the backup login deliberately can't delete anything).
 
-> Run manifests are only a few KB each. If we ever expired one *sooner* than the backup files it
-> describes, those files would become unidentifiable — we'd no longer know which K3s version they
-> came from. Set its lifecycle rule to outlive the longest-kept backup, not to whatever round
-> number looks tidy.
+| Folder | How often written | Lifecycle rule | Why that number |
+|--------|-------------------|----------------|-----------------|
+| `cluster-state/db/6hourly/` | 4× a day | **7 days** | Fine-grained rewind for the recent past, where it's actually useful |
+| `cluster-state/db/daily/` | 1× a day | **30 days** | A month of daily restore points |
+| `cluster-state/server-identity/` | 1× a day | **30 days** | Must cover the same window as the daily database |
+| `config/` | 1× a day | **30 days** | Tiny; matches the database window |
+| `manifests/` | 1× a day | **30 days** | Tiny; matches the database window |
+| `node-config/` | 1× a day | **90 days** | Changes rarely, and rebuilding a server without it is painful |
+| `image-manifest/` | Every run | **30 days** | Only useful alongside a database backup of the same age |
+| `run-manifests/` | Every run | **365 days** | ⚠️ Must outlive everything else — see below |
+| `velero/` | Daily (Phase 2) | Velero manages its own | Not our lifecycle rules |
+
+> ⚠️ **`run-manifests/` must expire last, always.** It's the only thing recording which K3s version
+> produced a given backup. If a manifest expires before the files it describes, those files become
+> unidentifiable — you'd be guessing at the version during a restore. They're a few KB each, so a
+> full year costs essentially nothing. **Never set this shorter than the longest rule above it.**
+
+### What this actually costs
+
+| | Storage | Roughly per month |
+|---|---------|-------------------|
+| With these lifecycle rules | ~3.7 GB steady state | **~$0.09** |
+| With no lifecycle rules at all | ~114 GB after one year, still growing | ~$2.85 and rising |
+
+At ~320 MB uploaded per day, the rules aren't really about the bill — they're about the bucket
+staying comprehensible. But they do keep it flat instead of growing forever.
 
 ### Keeping the bucket itself secure — not optional, not an afterthought
 
