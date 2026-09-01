@@ -137,10 +137,10 @@ re-issued from scratch.
 `tls` and `cred` subfolders (some earlier notes forgot these two). See
 [Backup Strategy §1](docs/02-backup-strategy.md#1-the-thing-to-understand-before-anything-else).
 
-**The other half:** Job 1 cannot restore a deleted PVC or a deleted Secret. `local-path` deletes a
-volume's files the instant its PVC goes away — no grace period. **Velero is the only thing standing
-between an accidental `kubectl delete pvc` and permanent loss**, which is why Phase 2 is not
-optional.
+**The other half:** Job 1 cannot restore a deleted PVC or a deleted Secret. Our storage runs a
+`Delete` reclaim policy, so `local-path` destroys a volume's files the instant its PVC goes away —
+no grace period, no orphan, nothing to recover from. **Velero is the only thing standing between an
+accidental `kubectl delete pvc` and permanent loss**, which is why Phase 2 is not optional.
 
 ## Ground rules for this repo
 

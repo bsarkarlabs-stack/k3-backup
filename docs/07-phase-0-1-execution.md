@@ -270,8 +270,10 @@ sudo k3s secrets-encrypt status 2>&1 | head -5
 
 Our backup script writes a "last successful backup" metric into a folder on the server:
 `/var/lib/node_exporter/textfile_collector`. If nothing is reading that folder, the metric is
-written into the void — and the alerting we're planning in Phase 4 would be built on something
-that silently does nothing.
+written into the void — and the alerting we're planning in Phase 3 would be built on something
+that silently does nothing. (This is exactly why
+[02 §8](02-backup-strategy.md#8-knowing-it-works) makes the primary alert the *age of the newest
+object in S3* instead: that proves the backup arrived, whatever node-exporter turns out to be.)
 
 Discovery never confirmed node-exporter is even installed, so let's find out:
 
@@ -297,7 +299,7 @@ sudo k3s kubectl get ds -A -o yaml 2>/dev/null \
 | What you find | What it means for alerting |
 |---------------|----------------------------|
 | Running on the server, with that folder present | Good. Confirm the exact folder and set `TEXTFILE_DIR` in `backup.env` explicitly rather than trusting our guessed default |
-| Running in the cluster, no server folder mounted | The metric goes nowhere. Phase 4 needs a different approach — see [#22](../../issues/22) |
+| Running in the cluster, no server folder mounted | The metric goes nowhere. Phase 3 needs a different approach — see [#22](../../issues/22) |
 | Not installed at all | Same conclusion: the metric hook does nothing today |
 
 > Worth considering either way: instead of trusting the script to report its own success, we could
@@ -659,6 +661,12 @@ cat > /tmp/k3-dr-writer-policy.json <<EOF
       "Resource": "arn:aws:s3:::$BUCKET/*"
     },
     {
+      "Sid": "VeleroExpiresItsOwnBackups",
+      "Effect": "Allow",
+      "Action": ["s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::$BUCKET/velero/*"
+    },
+    {
       "Sid": "UseTheDrKeyForBackupUploads",
       "Effect": "Allow",
       "Action": ["kms:Encrypt", "kms:GenerateDataKey", "kms:Decrypt", "kms:DescribeKey"],
@@ -677,10 +685,23 @@ aws iam create-access-key --user-name k3-master-backup-writer \
   --query 'AccessKey.{Id:AccessKeyId,Secret:SecretAccessKey}' --output table
 ```
 
-> Notice this login deliberately has **no ability to delete files**. A login that lives on a
-> production server, and can only ever *add* files, is a login that a hacked server can't use to
-> destroy our existing backups. Deleting old backups on a schedule is handled separately, by S3's
-> own cleanup rules in Phase 4 — never by this login.
+> Notice this login **cannot delete anything under `k3s/`**. A login that lives on a production
+> server and can only ever *add* files there is a login a hacked server can't use to destroy our
+> existing backups. Expiring old `k3s/` backups is handled entirely by S3's own lifecycle rules
+> (C.6a) — never by this login.
+
+> ⚠️ **Why `s3:DeleteObject` on `velero/` is not optional**
+>
+> Velero expires its own backups using the `ttl` on each Schedule — TTL expiry *is* Velero issuing
+> deletes. Without this statement nothing under `velero/` ever expires, and the "7 daily + 4
+> weekly" retention becomes fiction while the bucket grows forever. Velero also can't clean up
+> after a failed backup, leaving partial data behind.
+>
+> It's scoped to `velero/*` on purpose. That prefix is Velero's own repository, which it must
+> manage; the K3s artifacts under `k3s/` stay undeletable by anything on the server.
+>
+> **Do not "harden" this by removing it.** If you want to verify the blast radius is what you
+> think it is, the check in Stage D.3 already proves a delete against `k3s/` is denied.
 
 > ⚠️ **Why `kms:Decrypt` is in that list, even though it looks wrong** ([#21](../../issues/21))
 >
@@ -694,8 +715,9 @@ aws iam create-access-key --user-name k3-master-backup-writer \
 > completely the wrong place.
 >
 > It also doesn't actually widen access: this login already has `s3:GetObject` above, so it could
-> read backups either way. The restrictions that genuinely matter — **no delete**, only this one
-> encryption key, and bucket versioning turned on — are all still in place.
+> read backups either way. The restrictions that genuinely matter — **no delete outside
+> `velero/`**, only this one encryption key, and bucket versioning turned on — are all still in
+> place.
 
 Save the access key ID and secret somewhere safe right now — the secret is only shown once. They
 go into `/etc/k3s-backup/backup.env` in Stage D, and nowhere else. **Never commit them to this
@@ -747,7 +769,7 @@ Store the **reader** login somewhere safe, like a password manager or offline va
 [02 §2](02-backup-strategy.md#bucket-security--not-optional), it must **never** be placed on
 `k3-master`. Also assign a named person to be responsible for rotating this
 ([gap 7](05-gaps-and-open-questions.md#7-nobody-owns-rotating-the-s3-credentials), every 90 days)
-right now, rather than putting it off until Phase 6 — it only takes a few seconds while you're
+right now, rather than putting it off until Phase 5 — it only takes a few seconds while you're
 already setting this up.
 
 ```bash
@@ -853,7 +875,7 @@ rm -f /tmp/k3-egress-big.bin
 Now let's confirm our safety limits actually work — **both of the following must fail:**
 
 ```bash
-# should be blocked: this login can't delete files
+# should be blocked: this login cannot delete anything outside velero/
 sudo -E aws s3api delete-object --bucket "$S3_BUCKET" --key "_egress-test/k3-egress-test.txt"
 ```
 
@@ -864,8 +886,22 @@ sudo -E aws s3api put-object --bucket "$S3_BUCKET" --key "_egress-test/plaintext
 ```
 
 Both of these should return `AccessDenied`. If either one actually succeeds, our least-privilege
-setup isn't actually working — go back and fix it. Clean up from `[local]` using your admin
-login:
+setup isn't actually working — go back and fix it.
+
+**And one that must *succeed*** — this is the permission Velero needs to expire its own backups,
+and the one people remove by mistake while "hardening" the policy:
+
+```bash
+sudo -E aws s3 cp /tmp/k3-egress-test.txt "s3://$S3_BUCKET/velero/_permcheck.txt" \
+  --sse aws:kms --sse-kms-key-id "$KMS_KEY_ID"
+sudo -E aws s3api delete-object --bucket "$S3_BUCKET" --key "velero/_permcheck.txt"
+```
+
+If that delete returns `AccessDenied`, Velero will never expire a backup and the "7 daily +
+4 weekly" retention silently becomes "keep everything forever". Add the `VeleroExpiresItsOwnBackups`
+statement from C.7 before going any further.
+
+Clean up from `[local]` using your admin login:
 
 ```bash
 aws s3 rm "s3://$BUCKET/_egress-test/" --recursive

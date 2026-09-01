@@ -29,7 +29,7 @@ What needs to happen:
 
 ---
 
-### 2. [#10](../../issues/10) — Phase 1: Back up the server itself
+### 2. [#10](../../issues/10) — Phase 1: Job 1, the K3s server backup
 **Priority: Highest**
 
 What needs to happen:
@@ -47,7 +47,7 @@ What needs to happen:
 
 ---
 
-### 3. [#11](../../issues/11) — Phase 2: Install Velero
+### 3. [#11](../../issues/11) — Phase 2: Job 2, Velero
 **Priority: Highest — currently not done at all. This is half the design.**
 
 What needs to happen:
@@ -108,14 +108,17 @@ What needs to happen:
 
 ---
 
-### 6. [#12](../../issues/12) — Phase 5: Actually test a restore
+### 6. [#12](../../issues/12) — Phase 4: Prove a restore works
 **Priority: Medium — turns "hope" into "proof"**
 
 What needs to happen:
 - Spin up a throwaway test server matching `k3-master`'s specs
-- Run the full restore runbook end to end
-- Record how long it actually took
-- Fix whatever broke, update the runbook
+- Run [restore runbook §A](03-restore-runbook.md#a--full-server-rebuild) end to end
+- Confirm restored Prometheus answers a query over **pre-incident** data — proof the volume
+  restore worked, not just that the pod started
+- Run [§B](03-restore-runbook.md#b--restoring-one-pvc-or-one-object) once against a scratch
+  namespace
+- Record how long each took; fix whatever broke; update the runbook to match reality
 
 **Answer / Output:**
 ```
@@ -124,7 +127,7 @@ What needs to happen:
 
 ---
 
-### 7. [#3](../../issues/3) — Phase 6: Close remaining unknowns
+### 7. [#3](../../issues/3) — Phase 5: Close remaining unknowns
 **Priority: Low — doesn't block earlier phases**
 
 What needs to happen:
@@ -340,7 +343,7 @@ Two separate questions bundled under one issue:
 
 - **Does our "backup succeeded" signal go anywhere?** The script writes a success metric to
   `/var/lib/node_exporter/textfile_collector` — but we never confirmed node-exporter is even
-  installed, or that this folder is reachable. If not, the signal goes nowhere and Phase 4
+  installed, or that this folder is reachable. If not, the signal goes nowhere and Phase 3
   alerting would be built on a hook that does nothing.
 - **Is K3s encrypting Secrets inside its own database?** If yes, there's a key file
   (`cred/encryption-config.json`) that's required to read any Secret after a restore. We already
