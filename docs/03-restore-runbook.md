@@ -192,20 +192,35 @@ kubectl get pods -A
 Expect `kube-system`, `monitoring`, `argocd`, and the SBE/COW namespaces. Workloads are already
 here — they came back with the datastore. Their **volumes are empty**; step 9 fills them.
 
-### Step 8 — Install Velero against the same bucket
+### Step 8 — Install Velero against the same bucket, read-only
+
+Use the **restore-reader** credential here — the offline one from "Before you start", not the
+writer. It can read and decrypt backups but cannot write or delete any, which is exactly the
+authority a half-rebuilt server should have.
 
 ```bash
+cat > ./velero-credentials <<'EOF'
+[default]
+aws_access_key_id=<the RESTORE READER key>
+aws_secret_access_key=<the RESTORE READER secret>
+EOF
+chmod 600 ./velero-credentials
+
 export S3_BUCKET=k3-master-dr AWS_REGION=ap-south-1 KMS_KEY_ID=arn:aws:kms:...
 export CREDS_FILE=./velero-credentials
 ./scripts/velero/install-velero.sh
+
+# make the backup location read-only until you have verified the restore
+kubectl -n velero patch backupstoragelocation default \
+  --type merge -p '{"spec":{"accessMode":"ReadOnly"}}'
+
+shred -u ./velero-credentials
 ```
 
-Do **not** apply the Schedule objects yet. A restored cluster that starts writing backups before
-you've verified it can corrupt your idea of which backup is good.
-
-> If this is a test restore rather than a real one, add `readOnly=true` to
-> `--backup-location-config` so the practice cluster can never write into the production backup
-> location.
+Do **not** apply the Schedule objects yet, and leave the location `ReadOnly`. A half-restored
+cluster that starts writing backups can overwrite your idea of which backup is good — while you
+still might need to start over from it. Step 12 switches both back on, deliberately, once the
+restore is verified.
 
 ### Step 9 — Restore PVC data
 
@@ -258,7 +273,15 @@ is no separate export to import.
 
 ### Step 12 — Cut over
 
+Only now, once step 11 has actually passed, give the rebuilt server back its ability to write
+backups. Swap Velero's credential from the reader to the **writer**, drop the read-only lock, and
+re-enable both schedules:
+
 ```bash
+# replace the Secret with the backup-writer credential, then:
+kubectl -n velero patch backupstoragelocation default \
+  --type merge -p '{"spec":{"accessMode":"ReadWrite"}}'
+
 kubectl apply -f scripts/velero/schedule-daily.yaml
 kubectl apply -f scripts/velero/schedule-weekly.yaml
 sudo systemctl enable --now k3s-backup.timer

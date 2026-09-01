@@ -10,8 +10,8 @@
 | 2–3 | AWS account | 1–2 hrs | Bucket, KMS key, the two logins |
 | 4 | k3-master | 30 min | Install job 1, re-run preflight **with** AWS |
 | 5 | k3-master | 30 min | First real backup, then turn the timer on |
-| 6–7 | k3-master | 1 hr | Install job 2 (Velero) and verify it really reads the volumes |
-| 8+ | — | daily | Watch it, then test a restore |
+| 6–7 | laptop + cluster | 1 hr | Install job 2 (Velero) and verify it really reads the volumes |
+| 8+ | k3-master | daily | Watch both jobs, then test a restore |
 
 ---
 
@@ -53,7 +53,8 @@ Full commands are in [07 — Phase 0 & 1 Execution](docs/07-phase-0-1-execution.
 ```
 1. Create a KMS key
 2. Create the bucket k3-master-dr — encryption ON AT CREATION, versioning on, public access blocked
-3. Create the BACKUP WRITER login   (Put/Get/List; Delete only on velero/*; kms:GenerateDataKey + kms:Decrypt)
+3. Create the BACKUP WRITER login   (Put/Get/List/AbortMultipartUpload bucket-wide;
+                                     DELETE ONLY on velero/*; kms:GenerateDataKey + kms:Decrypt)
 4. Create the RESTORE READER login  (Get/List/kms:Decrypt) — store it offline, never on the server
 5. Add exactly two lifecycle rules: k3s/daily/ expire 8 days, k3s/weekly/ expire 31 days
 ```
@@ -73,12 +74,15 @@ sudo mkdir -p /etc/k3s-backup && sudo chmod 0700 /etc/k3s-backup
 sudo nano /etc/k3s-backup/backup.env       # S3_BUCKET, AWS_REGION, KMS_KEY_ID (full ARN), keys
 sudo chmod 0600 /etc/k3s-backup/backup.env
 
-# 2. from your laptop
-scp scripts/k3s-server-backup.sh root@45.90.98.51:/tmp/
-scp scripts/systemd/k3s-backup.* root@45.90.98.51:/etc/systemd/system/
+# 2. from your laptop — copy to /tmp, never straight into a system directory
+scp scripts/k3s-server-backup.sh <user>@45.90.98.51:/tmp/
+scp scripts/systemd/k3s-backup.service scripts/systemd/k3s-backup.timer <user>@45.90.98.51:/tmp/
 
-# 3. on the server
+# 3. on the server — install with explicit ownership and modes
 sudo install -m 0750 -o root -g root /tmp/k3s-server-backup.sh /usr/local/sbin/
+sudo install -m 0644 -o root -g root /tmp/k3s-backup.service /tmp/k3s-backup.timer \
+     /etc/systemd/system/
+sudo install -d -m 0700 -o root -g root /var/backups/k3s
 
 # 4. preflight WITH AWS — must come back READY before going further
 sudo /usr/local/sbin/k3s-backup-preflight.sh
@@ -128,6 +132,18 @@ From now on: **02:15 UTC every day**, and on Sundays it writes a second copy und
 
 Job 1 cannot restore a deleted PVC or a single deleted Secret. Velero is the only thing that can.
 
+Run this from your laptop, from your clone of this repo, with a kubeconfig that has cluster-admin.
+Velero needs the **same** backup-writer credentials job 1 uses, in AWS's own file format:
+
+```bash
+cat > ./velero-credentials <<'EOF'
+[default]
+aws_access_key_id=<the backup writer key>
+aws_secret_access_key=<the backup writer secret>
+EOF
+chmod 600 ./velero-credentials
+```
+
 ```bash
 export S3_BUCKET=k3-master-dr AWS_REGION=ap-south-1 KMS_KEY_ID=arn:aws:kms:...
 export CREDS_FILE=./velero-credentials
@@ -135,6 +151,8 @@ export CREDS_FILE=./velero-credentials
 
 kubectl apply -f scripts/velero/schedule-daily.yaml
 kubectl apply -f scripts/velero/schedule-weekly.yaml
+
+shred -u ./velero-credentials    # it is now a Secret in the cluster; don't leave a copy around
 ```
 
 **Then verify it properly — a green checkmark is not evidence:**
@@ -152,7 +170,7 @@ Finish by restoring one thing into a scratch namespace. That's the proof.
 
 ---
 
-## WEEK 2+ — Watch it
+## DAY 8+ — Watch it
 
 ```bash
 journalctl -u k3s-backup.service --since '48 hours ago' | tail -30

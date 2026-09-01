@@ -64,4 +64,4 @@ echo "  velero backup create verify-\$(date +%s) --wait"
 echo "  velero backup describe <name> --details    # confirm all 6 PVCs listed under 'Pod Volume Backups'"
 echo
 echo "If 'Pod Volume Backups' is empty, the node-agent is not reading the"
-echo "kubelet root correctly — see docs/02-backup-strategy.md §8, gap 2."
+echo "kubelet root correctly — see docs/02-backup-strategy.md §9, gap 2."

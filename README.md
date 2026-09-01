@@ -56,6 +56,10 @@ Full detail: [02 — Backup Strategy](docs/02-backup-strategy.md).
 | 04 | [Implementation TODO](docs/04-implementation-todo.md) | The build plan, broken into phases. Matches our GitHub Issues. |
 | 05 | [Gaps & Open Questions](docs/05-gaps-and-open-questions.md) | Things we still don't know for sure. Don't assume — read this first if something is unclear. |
 | 06 | [Developer Access](docs/06-developer-access.md) | How a new developer gets permission to clone and push to this repo. |
+| 07 | [Phase 0 & 1 Execution](docs/07-phase-0-1-execution.md) | The commands to actually build Phases 0 and 1, one at a time, with a check after each. Covers job 1 only. |
+| — | [Issues Tracker](docs/ISSUES-TRACKER.md) | Every open issue in one place, with a box to paste the answer into as each is resolved. |
+
+In a hurry? [QUICK_START.md](QUICK_START.md) is the day-by-day version of 07 plus the Velero install.
 
 ## Where things stand right now
 
@@ -79,13 +83,13 @@ they were created at different times.)
 ### Build phases
 
 | Phase | What it covers | How urgent | Issue |
-|-------|-----------------|------------|-------|
-| 0 — S3 bucket, encryption key, the two logins | Highest | [#9](../../issues/9), [#14](../../issues/14) |
-| 1 — Job 1: deploy the K3s server backup + timer | Highest | [#10](../../issues/10) |
-| 2 — Job 2: install Velero + the two schedules | Highest | [#11](../../issues/11) |
-| 3 — Retention rules + "did the backup arrive?" alerting | Medium | [#2](../../issues/2) |
-| 4 — Actually test both restore flows | Medium | [#12](../../issues/12) |
-| 5 — Close the remaining unknowns | Low | [#3](../../issues/3) |
+|-------|----------------|------------|-------|
+| 0 | S3 bucket, encryption key, the two logins | Highest | [#9](../../issues/9), [#14](../../issues/14) |
+| 1 | Job 1: deploy the K3s server backup + timer | Highest | [#10](../../issues/10) |
+| 2 | Job 2: install Velero + the two schedules | Highest | [#11](../../issues/11) |
+| 3 | Retention rules + "did the backup arrive?" alerting | Medium | [#2](../../issues/2) |
+| 4 | Actually test both restore flows | Medium | [#12](../../issues/12) |
+| 5 | Close the remaining unknowns | Low | [#3](../../issues/3) |
 
 ### Blocking unknowns — the three that could make this design wrong
 

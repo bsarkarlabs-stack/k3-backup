@@ -80,7 +80,7 @@ cluster CA. **This bucket is a more valuable target than the server it protects.
 
 | Login | Can do | Lives |
 |-------|--------|-------|
-| **Backup writer** | `PutObject`, `GetObject`, `ListBucket` on `k3s/*` and `velero/*`; `DeleteObject` + `AbortMultipartUpload` on **`velero/*` only**; `kms:GenerateDataKey` + `kms:Decrypt` on our one key | On the server in `/etc/k3s-backup/backup.env` (0600), and as a Secret in the `velero` namespace |
+| **Backup writer** | `PutObject`, `GetObject`, `AbortMultipartUpload` across the bucket; `ListBucket` on the bucket; **`DeleteObject` on `velero/*` only**; `kms:GenerateDataKey` + `kms:Decrypt` on our one key | On the server in `/etc/k3s-backup/backup.env` (0600), and as a Secret in the `velero` namespace |
 | **Restore reader** | `GetObject`, `ListBucket`, `kms:Decrypt` | Offline, in the password manager. **Never on the server** — if the server is compromised, the backups must not be. |
 
 > ### Two permissions people get wrong
@@ -179,8 +179,12 @@ failure surface for a window nobody asked for.
 
 ## 6. Retention — 7 daily + 4 weekly
 
-Expressed twice: as S3 lifecycle rules for Job 1, as Velero TTL for Job 2. **No script ever deletes
-anything**, and the server's login has no delete permission on `k3s/*` at all.
+Expressed twice: as S3 lifecycle rules for Job 1, as Velero TTL for Job 2.
+
+**Our backup script never deletes anything**, and the credential it uses has no delete permission
+on `k3s/*` at all — expiry there is entirely S3's job. Velero is the one exception, and it has to
+be: TTL expiry *is* Velero deleting its own objects, which is why the credential grants
+`s3:DeleteObject` on `velero/*` and nowhere else ([§2](#bucket-security--not-optional)).
 
 | Location | Written | Expiry mechanism | Keeps |
 |----------|---------|------------------|-------|

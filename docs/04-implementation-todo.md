@@ -25,9 +25,10 @@ Step-by-step commands for phases 0–1 are in
 - [ ] Create a dedicated KMS key
 - [ ] Create the bucket `k3-master-dr` — **with default encryption on from creation**, versioning
       on, all public access blocked. Encryption is not retroactive ([#14](../../issues/14))
-- [ ] Create the **backup writer** login: `Put/Get/List` on `k3s/*` and `velero/*`,
-      `Delete` + `AbortMultipartUpload` on **`velero/*` only**, `kms:GenerateDataKey` +
-      **`kms:Decrypt`** on the one key
+- [ ] Create the **backup writer** login: `Put`/`Get`/`AbortMultipartUpload` across the bucket
+      (job 1's 64 MB upload to `k3s/` is multipart, so Abort cannot be scoped to `velero/`),
+      `ListBucket` on the bucket, **`DeleteObject` on `velero/*` only**, plus
+      `kms:GenerateDataKey` + **`kms:Decrypt`** on the one key
 - [ ] Create the **restore reader** login (`Get`/`List`/`kms:Decrypt`) and store it offline —
       never on `k3-master`
 - [ ] Test the writer with a **64 MB** file, not a small one — that is what exercises the
@@ -56,6 +57,9 @@ written, not yet deployed.
 **Highest.** This is the piece that makes PVC data and single-object restores possible at all.
 Nothing else in this plan covers either.
 
+- [ ] Write the backup-writer credentials into a `velero-credentials` file in AWS's own format
+      (`[default]` / `aws_access_key_id` / `aws_secret_access_key`), then shred it once Velero has
+      turned it into a Secret
 - [ ] Run [`scripts/velero/install-velero.sh`](../scripts/velero/install-velero.sh) — Velero + AWS
       plugin, node-agent on, `prefix=velero`, SSE-KMS with our key
 - [ ] Apply [`schedule-daily.yaml`](../scripts/velero/schedule-daily.yaml) and
