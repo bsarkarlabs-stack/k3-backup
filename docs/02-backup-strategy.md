@@ -80,7 +80,7 @@ cluster CA. **This bucket is a more valuable target than the server it protects.
 
 | Login | Can do | Lives |
 |-------|--------|-------|
-| **Backup writer** | `PutObject`, `GetObject`, `ListBucket` on `k3s/*` and `velero/*`; `DeleteObject` + `AbortMultipartUpload` on **`velero/*` only**; `kms:GenerateDataKey` + `kms:Decrypt` on our one key | On the server in `/etc/k3s-backup/backup.env` (0600), and as a Secret in the `velero` namespace |
+| **Backup writer** | `PutObject`, `GetObject`, `AbortMultipartUpload` across the bucket; `ListBucket` on the bucket; **`DeleteObject` on `velero/*` only**; `kms:GenerateDataKey` + `kms:Decrypt` on our one key | On the server in `/etc/k3s-backup/backup.env` (0600), and as a Secret in the `velero` namespace |
 | **Restore reader** | `GetObject`, `ListBucket`, `kms:Decrypt` | Offline, in the password manager. **Never on the server** — if the server is compromised, the backups must not be. |
 
 > ### Two permissions people get wrong
@@ -92,7 +92,7 @@ cluster CA. **This bucket is a more valuable target than the server it protects.
 > **The writer needs `kms:Decrypt`.** Any file over 8 MB uploads as a *multipart* upload, and
 > multipart to a KMS-encrypted bucket requires Decrypt as well as GenerateDataKey. `state.db` is
 > ~64 MB, so a policy that looks correctly write-only fails on the first real backup — and passes
-> every small test file you try it with. Test with a 64 MB file. See [#21](../../issues/21).
+> every small test file you try it with. Test with a 64 MB file. See [#21](../../../issues/21).
 
 ---
 
@@ -179,8 +179,12 @@ failure surface for a window nobody asked for.
 
 ## 6. Retention — 7 daily + 4 weekly
 
-Expressed twice: as S3 lifecycle rules for Job 1, as Velero TTL for Job 2. **No script ever deletes
-anything**, and the server's login has no delete permission on `k3s/*` at all.
+Expressed twice: as S3 lifecycle rules for Job 1, as Velero TTL for Job 2.
+
+**Our backup script never deletes anything**, and the credential it uses has no delete permission
+on `k3s/*` at all — expiry there is entirely S3's job. Velero is the one exception, and it has to
+be: TTL expiry *is* Velero deleting its own objects, which is why the credential grants
+`s3:DeleteObject` on `velero/*` and nowhere else ([§2](#bucket-security--not-optional)).
 
 | Location | Written | Expiry mechanism | Keeps |
 |----------|---------|------------------|-------|
@@ -223,7 +227,7 @@ Nothing below was needed to restore the cluster safely.
 | `run-manifests/` prefix + its 365-day rule | **Folded in** | The *information* is required and kept — as `MANIFEST.json` inside each day's folder, where it can neither outlive nor predecease the files it describes. The separate prefix and its "must expire last" rule are gone, and with them the `pairs_with_full_run` field: one run per day means one folder holds the whole set. |
 | `image-manifest/` job | **Removed** | Velero stores every workload spec and each spec names its image; `registries.yaml` is in Job 1. It re-derived data both jobs already hold. |
 | Daily `node-config/` job and prefix | **Folded into Job 1** | Real value, wrong shape — it changes maybe twice a year. Same job, same folder, no separate schedule or retention rule. Set `INCLUDE_NODE_CONFIG=0` to drop it entirely. Closes gaps 3 and 4. |
-| Daily `argocd admin export` | **Removed** | Velero backs up the whole `argocd` namespace including Secrets, Applications and AppProjects; Git holds the app definitions. Verify this once during the restore test, then let it go. Settles [#20](../../issues/20). |
+| Daily `argocd admin export` | **Removed** | Velero backs up the whole `argocd` namespace including Secrets, Applications and AppProjects; Git holds the app definitions. Verify this once during the restore test, then let it go. Settles [#20](../../../issues/20). |
 | Monthly tier, 90-day and 365-day rules | **Removed** | See §6. |
 
 Kept, deliberately: the SHA-256 per artifact (three lines of script; turns a corrupt upload into a
@@ -246,7 +250,7 @@ Prometheus/Grafana/Alertmanager — reuse it rather than adding a tool.
 | **Full restore test every 3 months** | See the [restore runbook](03-restore-runbook.md). *A backup that has never been restored is a hope, not a plan.* |
 
 The script also writes a node-exporter textfile metric if that directory exists. Treat it as a
-bonus, not the alert — we never confirmed anything reads it ([#22](../../issues/22)).
+bonus, not the alert — we never confirmed anything reads it ([#22](../../../issues/22)).
 
 ---
 
@@ -256,10 +260,10 @@ The design is only as good as these answers. The first three are **blocking**.
 
 | # | Gap | Why it blocks | Issue |
 |---|-----|---------------|-------|
-| 1 | **Where Traefik's TLS certificates come from.** No cert-manager was found. If Traefik issues them itself and keeps `acme.json` in an `emptyDir`, **nothing here backs it up** and a restore comes back with broken HTTPS and no warning. | If it's a Secret, Velero already covers it and this closes. If it's ephemeral, either move it to a PVC or document re-issuance as a restore step. | [#4](../../issues/4) |
-| 2 | **Velero node-agent vs. K3s's kubelet root.** File-system backup reads pod volumes through a hostPath into the kubelet root directory, and K3s does not always use the stock `/var/lib/kubelet`. A mismatch starts cleanly and backs up **nothing** — it looks like an empty backup, not an error. | Confirm the path, then prove it: `velero backup describe <name> --details` must list all six PVCs under *Pod Volume Backups*. | [#11](../../issues/11) |
-| 3 | **Nothing has ever been restored.** Both flows in the runbook are unproven, and the RTO is an estimate. | Run the full flow once on a throwaway host and the PVC flow once against a scratch namespace. | [#12](../../issues/12) |
-| 4 | **Crash-consistency of the Prometheus / Loki / MinIO volumes.** File-system backup of a running TSDB is crash-consistent, not application-consistent. Prometheus usually replays its WAL fine; MinIO and Loki's boltdb-shipper are less forgiving. | Verify each restored pod reaches Ready with pre-incident data queryable. Add a Velero pre-backup hook **only if** the test shows you need one. | [#12](../../issues/12) |
-| 5 | **Is K3s encrypting Secrets in its own database?** (`k3s secrets-encrypt status`) | Either answer is fine — `cred/` is backed up regardless. But if it's on, restoring `cred/encryption-config.json` becomes a hard precondition before starting K3s. | [#22](../../issues/22) |
-| 6 | **Backup-arrived alerting isn't wired up yet.** | Until §8 exists, a silently broken backup stays silent. | [#2](../../issues/2) |
-| 7 | **Single region, single bucket.** Reasonable for one server with no failover — but it should be a decision on the record, not a default. | Versioning plus locked-down delete permissions is the meaningful protection here, not a second region. | [#15](../../issues/15) |
+| 1 | **Where Traefik's TLS certificates come from.** No cert-manager was found. If Traefik issues them itself and keeps `acme.json` in an `emptyDir`, **nothing here backs it up** and a restore comes back with broken HTTPS and no warning. | If it's a Secret, Velero already covers it and this closes. If it's ephemeral, either move it to a PVC or document re-issuance as a restore step. | [#4](../../../issues/4) |
+| 2 | **Velero node-agent vs. K3s's kubelet root.** File-system backup reads pod volumes through a hostPath into the kubelet root directory, and K3s does not always use the stock `/var/lib/kubelet`. A mismatch starts cleanly and backs up **nothing** — it looks like an empty backup, not an error. | Confirm the path, then prove it: `velero backup describe <name> --details` must list all six PVCs under *Pod Volume Backups*. | [#11](../../../issues/11) |
+| 3 | **Nothing has ever been restored.** Both flows in the runbook are unproven, and the RTO is an estimate. | Run the full flow once on a throwaway host and the PVC flow once against a scratch namespace. | [#12](../../../issues/12) |
+| 4 | **Crash-consistency of the Prometheus / Loki / MinIO volumes.** File-system backup of a running TSDB is crash-consistent, not application-consistent. Prometheus usually replays its WAL fine; MinIO and Loki's boltdb-shipper are less forgiving. | Verify each restored pod reaches Ready with pre-incident data queryable. Add a Velero pre-backup hook **only if** the test shows you need one. | [#12](../../../issues/12) |
+| 5 | **Is K3s encrypting Secrets in its own database?** (`k3s secrets-encrypt status`) | Either answer is fine — `cred/` is backed up regardless. But if it's on, restoring `cred/encryption-config.json` becomes a hard precondition before starting K3s. | [#22](../../../issues/22) |
+| 6 | **Backup-arrived alerting isn't wired up yet.** | Until §8 exists, a silently broken backup stays silent. | [#2](../../../issues/2) |
+| 7 | **Single region, single bucket.** Reasonable for one server with no failover — but it should be a decision on the record, not a default. | Versioning plus locked-down delete permissions is the meaningful protection here, not a second region. | [#15](../../../issues/15) |

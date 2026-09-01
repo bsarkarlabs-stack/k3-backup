@@ -333,12 +333,34 @@ else
        # it does not widen access — the policy already grants s3:GetObject"
       fi
 
-      # guardrail: delete must be refused
+      # guardrail: delete must be refused OUTSIDE velero/. A compromised server
+      # must not be able to destroy the k3s/ backups.
       if aws s3api delete-object --bucket "$S3_BUCKET" --key "_preflight/small.txt" >/dev/null 2>&1; then
-        warn "this login CAN delete objects — a compromised server could destroy the backups" \
-             "# remove s3:DeleteObject from the writer policy (docs/07 Stage C.7)"
+        warn "this login CAN delete objects outside velero/ — a compromised server could destroy the backups" \
+             "# scope s3:DeleteObject to arn:aws:s3:::$S3_BUCKET/velero/* only, never bucket-wide
+       # (docs/07 Stage C.7). Velero needs it there; nothing needs it under k3s/."
       else
-        pass "delete is correctly refused for this login"
+        pass "delete outside velero/ is correctly refused"
+      fi
+
+      # the opposite guardrail: delete MUST be allowed inside velero/, or Velero
+      # can never expire a backup and the 7+4 retention silently never happens.
+      # This one cleans up after itself, since the login can delete here.
+      if aws s3 cp "$TMPD/small.txt" "s3://$S3_BUCKET/velero/_preflight-permcheck.txt" \
+           --only-show-errors --sse aws:kms --sse-kms-key-id "$KMS_KEY_ID" 2>/dev/null; then
+        if aws s3api delete-object --bucket "$S3_BUCKET" \
+             --key "velero/_preflight-permcheck.txt" >/dev/null 2>&1; then
+          pass "delete inside velero/ works — Velero can expire its own backups"
+        else
+          fail "delete inside velero/ is DENIED — Velero can never expire a backup, so retention silently becomes 'keep forever'" \
+               "# add to the writer policy (docs/07 Stage C.7):
+       #   { \"Sid\": \"VeleroExpiresItsOwnBackups\", \"Effect\": \"Allow\",
+       #     \"Action\": [\"s3:DeleteObject\"],
+       #     \"Resource\": \"arn:aws:s3:::$S3_BUCKET/velero/*\" }"
+        fi
+      else
+        warn "could not write a test object under velero/ — Velero's own uploads may fail too" \
+             "# confirm the writer policy covers s3:PutObject on $S3_BUCKET/velero/*"
       fi
 
       # guardrail: unencrypted put must be refused

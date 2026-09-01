@@ -5,12 +5,12 @@ work is done, close the issue and tick the box here.
 
 | Phase | What it is | Urgency | Issue |
 |-------|------------|---------|-------|
-| 0 | The bucket, the keys, the logins | Do this first | [#9](../../issues/9), [#14](../../issues/14) |
-| 1 | Job 1 — K3s server backup | Highest | [#10](../../issues/10) |
-| 2 | Job 2 — Velero | Highest | [#11](../../issues/11) |
-| 3 | Retention + alerting | Medium | [#2](../../issues/2) |
-| 4 | Prove a restore works | Medium | [#12](../../issues/12) |
-| 5 | Close the remaining unknowns | Low | [#3](../../issues/3) |
+| 0 | The bucket, the keys, the logins | Do this first | [#9](../../../issues/9), [#14](../../../issues/14) |
+| 1 | Job 1 — K3s server backup | Highest | [#10](../../../issues/10) |
+| 2 | Job 2 — Velero | Highest | [#11](../../../issues/11) |
+| 3 | Retention + alerting | Medium | [#2](../../../issues/2) |
+| 4 | Prove a restore works | Medium | [#12](../../../issues/12) |
+| 5 | Close the remaining unknowns | Low | [#3](../../../issues/3) |
 
 Step-by-step commands for phases 0–1 are in
 [07 — Phase 0 & 1 Execution](07-phase-0-1-execution.md).
@@ -24,14 +24,15 @@ Step-by-step commands for phases 0–1 are in
       installed and does not need to be)
 - [ ] Create a dedicated KMS key
 - [ ] Create the bucket `k3-master-dr` — **with default encryption on from creation**, versioning
-      on, all public access blocked. Encryption is not retroactive ([#14](../../issues/14))
-- [ ] Create the **backup writer** login: `Put/Get/List` on `k3s/*` and `velero/*`,
-      `Delete` + `AbortMultipartUpload` on **`velero/*` only**, `kms:GenerateDataKey` +
-      **`kms:Decrypt`** on the one key
+      on, all public access blocked. Encryption is not retroactive ([#14](../../../issues/14))
+- [ ] Create the **backup writer** login: `Put`/`Get`/`AbortMultipartUpload` across the bucket
+      (job 1's 64 MB upload to `k3s/` is multipart, so Abort cannot be scoped to `velero/`),
+      `ListBucket` on the bucket, **`DeleteObject` on `velero/*` only**, plus
+      `kms:GenerateDataKey` + **`kms:Decrypt`** on the one key
 - [ ] Create the **restore reader** login (`Get`/`List`/`kms:Decrypt`) and store it offline —
       never on `k3-master`
 - [ ] Test the writer with a **64 MB** file, not a small one — that is what exercises the
-      multipart path where the missing `kms:Decrypt` shows up ([#21](../../issues/21))
+      multipart path where the missing `kms:Decrypt` shows up ([#21](../../../issues/21))
 
 ---
 
@@ -43,10 +44,10 @@ written, not yet deployed.
 - [ ] Run the preflight (`k3s-backup-preflight.sh`) and get a READY result
 - [ ] `DRY_RUN=1` run — confirm it produces `state.db`, `k3s-identity.tar.gz`,
       `node-config.tar.gz`, `MANIFEST.json` and four `.sha256` files
-- [ ] Confirm `MANIFEST.json` records the correct `k3s_version` ([#17](../../issues/17))
+- [ ] Confirm `MANIFEST.json` records the correct `k3s_version` ([#17](../../../issues/17))
 - [ ] One real run — confirm the folder arrives at `s3://k3-master-dr/k3s/daily/YYYY-MM-DD/`
 - [ ] Extract the identity archive somewhere scratch and confirm `tls/`, `cred/`, `token`,
-      `manifests/`, `/etc/rancher/k3s` and the systemd unit are all in it ([#8](../../issues/8))
+      `manifests/`, `/etc/rancher/k3s` and the systemd unit are all in it ([#8](../../../issues/8))
 - [ ] `systemctl enable --now k3s-backup.timer`, then confirm with `systemctl list-timers`
 - [ ] Confirm a Sunday run also writes `k3s/weekly/`
 
@@ -56,6 +57,9 @@ written, not yet deployed.
 **Highest.** This is the piece that makes PVC data and single-object restores possible at all.
 Nothing else in this plan covers either.
 
+- [ ] Write the backup-writer credentials into a `velero-credentials` file in AWS's own format
+      (`[default]` / `aws_access_key_id` / `aws_secret_access_key`), then shred it once Velero has
+      turned it into a Secret
 - [ ] Run [`scripts/velero/install-velero.sh`](../scripts/velero/install-velero.sh) — Velero + AWS
       plugin, node-agent on, `prefix=velero`, SSE-KMS with our key
 - [ ] Apply [`schedule-daily.yaml`](../scripts/velero/schedule-daily.yaml) and
@@ -66,7 +70,7 @@ Nothing else in this plan covers either.
       ([02 §9 gap 2](02-backup-strategy.md#9-gaps-that-still-need-validating))
 - [ ] Confirm cluster-scoped resources are in the backup (CRDs, ClusterRoles, StorageClass)
 - [ ] Confirm the `argocd` namespace backup contains its Secrets and Applications — this is what
-      retires the separate ArgoCD export ([#20](../../issues/20), [#1](../../issues/1))
+      retires the separate ArgoCD export ([#20](../../../issues/20), [#1](../../../issues/1))
 - [ ] Do one small restore into a scratch namespace. **Don't just trust a green checkmark.**
 - [ ] Confirm old backups actually expire after their TTL — proves the `DeleteObject` permission
       is right
@@ -103,14 +107,14 @@ Nothing else in this plan covers either.
 
 ## Phase 5 — Close the remaining unknowns
 
-- [ ] **Where Traefik's TLS certificates come from** ([#4](../../issues/4)) — the one gap that can
+- [ ] **Where Traefik's TLS certificates come from** ([#4](../../../issues/4)) — the one gap that can
       silently produce a broken restore
 - [ ] `k3s secrets-encrypt status` — if on, note in the runbook that `cred/encryption-config.json`
-      is mandatory ([#22](../../issues/22))
-- [ ] Decide explicitly whether one region is acceptable ([#15](../../issues/15))
+      is mandatory ([#22](../../../issues/22))
+- [ ] Decide explicitly whether one region is acceptable ([#15](../../../issues/15))
 - [ ] Assign one person and a schedule (suggest 90 days) for rotating the S3 credentials
-      ([#16](../../issues/16))
-- [ ] Keep this repo as the one true copy of the documentation ([#7](../../issues/7))
+      ([#16](../../../issues/16))
+- [ ] Keep this repo as the one true copy of the documentation ([#7](../../../issues/7))
 
 ---
 
