@@ -46,25 +46,30 @@ file copy would have been the dangerous option — that's exactly why the script
 
 This backs up **K3s only**, not the entire server disk. No full disk image, no copy of
 `/var/lib/rancher/k3s/agent` (that's the 43 GB of container images/cache, which we deliberately
-skip — see [02 §8](02-backup-strategy.md#8-what-is-explicitly-not-backed-up)). Our recovery plan
+skip — see [02 §3](02-backup-strategy.md#what-job-1-deliberately-does-not-back-up)). Our recovery plan
 is: *set up a plain Ubuntu server, install the matching K3s version, then put K3s's own saved
 state back on top of it.*
 
-There's one deliberate exception worth calling out. The "full" backup run also grabs about 1 MB
-of the server's OS-level settings — network settings, firewall rules, `/etc/ssh`, allowed logins,
-timezone, and the list of installed packages. That's not technically K3s, but it's what turns
-[restore step 2](03-restore-runbook.md#step-2--restore-node-level-os-configuration) from *"try to
-remember the static IP and firewall rules from memory, during an actual outage"* into *"just
-unpack this file."* This is part of
-[Phase 1](04-implementation-todo.md#phase-1--node--cluster-state-backup-track-a) and closes gap
+There's one deliberate exception worth calling out. The run also grabs about 1 MB of the server's
+OS-level settings — network settings, firewall rules, `/etc/ssh`, allowed logins, timezone, and the
+list of installed packages. That's not technically K3s, but it's what turns
+[restore step 2](03-restore-runbook.md#step-2--prepare-the-host) from *"try to remember the static
+IP and firewall rules from memory, during an actual outage"* into *"just unpack this file."* It
+rides along in the same job and the same folder — no extra schedule, no extra retention rule. This
+is part of [Phase 1](04-implementation-todo.md#phase-1--job-1-k3s-server-backup) and closes gap
 [#5](../../issues/5).
 
 We recommend keeping this unless you have a specific reason not to. If you want a strictly
 K3s-only backup, add this line to `/etc/k3s-backup/backup.env`:
 
 ```ini
-BACKUP_NODE_CONFIG=0
+INCLUDE_NODE_CONFIG=0
 ```
+
+> **This document covers job 1 only.** Job 2 (Velero — every Kubernetes object, plus all PVC data)
+> is a separate install: [`scripts/velero/`](../scripts/velero/) and
+> [04 Phase 2](04-implementation-todo.md#phase-2--job-2-velero). Job 1 alone cannot restore a
+> deleted PVC or a single deleted Secret.
 
 ### A quick note on how the instructions are labeled
 
@@ -335,7 +340,7 @@ systemd-detect-virt
 **Check:** `none` means real hardware; anything else names which virtualization software we're
 running inside. Either way, there's no hosting-provider snapshot to fall back on — already
 written down in
-[01 §17](01-discovery-baseline.md#17-hosting-provider--datalix-treated-as-on-premise). This closes
+[01 §17](01-discovery-baseline.md#17-who-hosts-this-server--not-fully-confirmed-at-first-later-resolved). This closes
 gap #13.
 
 ### B.4 — Confirm we can do a safe SQLite backup (Phase 0 item)
@@ -358,16 +363,20 @@ sudo apt-get update && sudo apt-get install -y sqlite3
 > Installing `sqlite3` this way doesn't touch K3s at all, but it would still be the only new
 > software installed anywhere in this whole guide. Try the Python approach first.
 
-### B.5 — Try out the container image list feature (item 8)
+### B.5 — Note which container images we depend on (informational)
 
 ```bash
 sudo k3s kubectl get pods -A -o jsonpath='{range .items[*]}{range .spec.initContainers[*]}{.image}{"\n"}{end}{range .spec.containers[*]}{.image}{"\n"}{end}{end}' \
   | sed '/^$/d' | sort -u
 ```
 
-**Check:** you should get a list of unique container images, roughly matching the apps listed in
-[01 §13](01-discovery-baseline.md#13-argocd). This is exactly what our backup script will save
-automatically — running it by hand first means no surprises later.
+**Check:** a list of unique images, roughly matching the apps in
+[01 §13](01-discovery-baseline.md#13-argocd-deploys-our-apps-automatically-from-git).
+
+> This used to be saved as its own backup job and its own S3 folder. It isn't any more: Velero
+> stores every workload spec and each spec names its image, and `registries.yaml` (where to pull
+> them from) is in job 1's archive. Running this by hand is still a useful sanity check — it just
+> isn't something we need to store daily.
 
 ---
 
@@ -377,9 +386,9 @@ Run all of these from your own laptop, using your admin AWS login. **Nothing in 
 touches `k3-master` at all.**
 
 The order matters here: we create the encryption key first, because
-[gap 5](05-gaps-and-open-questions.md#5-secrets-reach-s3-unencrypted-unless-sse-kms-is-configured)
-already told us that turning on encryption later doesn't apply to files already uploaded before
-that point. The bucket needs to be encrypted from its very first file.
+[bucket security](02-backup-strategy.md#bucket-security--not-optional) depends on it — turning on
+encryption later does **not** apply to files already uploaded before that point. The bucket needs
+to be encrypted from its very first file.
 
 ### C.0 — Pick a region (just one line to change, any of these work)
 
@@ -405,15 +414,15 @@ export REGION=ap-south-1     # or us-east-1, or eu-central-1
 
 > **Why we're sending this data off-site at all:** our server is on-premise with no
 > hosting-provider snapshot feature
-> ([gap 1](05-gaps-and-open-questions.md#1-hosting-provider--resolved-datalix-treated-as-on-premise)).
+> (Datalix, treated as on-premise — [05](05-gaps-and-open-questions.md#closed-by-the-simplified-design)).
 > A backup that only lives on `k3-master` itself dies right along with `k3-master`. This S3
 > bucket is the only copy that would survive a disk failure, a fire, or theft — that's the entire
 > reason it needs to be somewhere else, not because we specifically prefer AWS.
 >
 > S3 is just the destination we picked, as explained in
-> [02 §5](02-backup-strategy.md#5-s3-storage-design). Any off-server location would satisfy this
+> [02 §2](02-backup-strategy.md#2-where-it-all-goes). Any off-server location would satisfy this
 > requirement — only the upload step inside
-> [`k3s-track-a-backup.sh`](../scripts/k3s-track-a-backup.sh) would need to change. What's **not**
+> [`k3s-server-backup.sh`](../scripts/k3s-server-backup.sh) would need to change. What's **not**
 > acceptable is a destination on the same machine — including the MinIO storage running inside
 > our own cluster, since that lives on the exact same disk we're trying to protect against.
 
@@ -563,51 +572,25 @@ show `aws:kms` with your key's ARN; and the policy should be there.
 ### C.6a — Retention rules, so the bucket doesn't grow forever
 
 Set these up **now**, while you're already in the bucket settings. Without them nothing is ever
-deleted, and versioning means even overwrites pile up — roughly 320 MB a day, about 114 GB after a
-year.
+deleted, and versioning means even overwrites pile up.
 
-Each rule is just *"delete N days after upload"*, applied to one folder. That's the only thing an
-S3 lifecycle rule can do — which is exactly why our backups are filed into separate folders per
-retention period.
+A lifecycle rule can only say *"delete N days after upload"*. That single limitation is the whole
+reason job 1 writes into two folders: `k3s/daily/` every day, and `k3s/weekly/` on Sundays as well.
+Two folders, two rules, and we get 7 daily + 4 weekly restore points.
 
 ```bash
 cat > /tmp/k3-dr-lifecycle.json <<'EOF'
 {
   "Rules": [
-    { "ID": "db-6hourly-7d",  "Status": "Enabled",
-      "Filter": { "Prefix": "cluster-state/db/6hourly/" },
-      "Expiration": { "Days": 7 },
-      "NoncurrentVersionExpiration": { "NoncurrentDays": 1 } },
+    { "ID": "k3s-daily-8d",  "Status": "Enabled",
+      "Filter": { "Prefix": "k3s/daily/" },
+      "Expiration": { "Days": 8 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 2 } },
 
-    { "ID": "db-daily-30d",   "Status": "Enabled",
-      "Filter": { "Prefix": "cluster-state/db/daily/" },
-      "Expiration": { "Days": 30 },
-      "NoncurrentVersionExpiration": { "NoncurrentDays": 1 } },
-
-    { "ID": "identity-30d",   "Status": "Enabled",
-      "Filter": { "Prefix": "cluster-state/server-identity/" },
-      "Expiration": { "Days": 30 },
-      "NoncurrentVersionExpiration": { "NoncurrentDays": 1 } },
-
-    { "ID": "config-30d",     "Status": "Enabled",
-      "Filter": { "Prefix": "config/" },
-      "Expiration": { "Days": 30 } },
-
-    { "ID": "manifests-30d",  "Status": "Enabled",
-      "Filter": { "Prefix": "manifests/" },
-      "Expiration": { "Days": 30 } },
-
-    { "ID": "images-30d",     "Status": "Enabled",
-      "Filter": { "Prefix": "image-manifest/" },
-      "Expiration": { "Days": 30 } },
-
-    { "ID": "node-config-90d","Status": "Enabled",
-      "Filter": { "Prefix": "node-config/" },
-      "Expiration": { "Days": 90 } },
-
-    { "ID": "run-manifests-365d", "Status": "Enabled",
-      "Filter": { "Prefix": "run-manifests/" },
-      "Expiration": { "Days": 365 } },
+    { "ID": "k3s-weekly-31d", "Status": "Enabled",
+      "Filter": { "Prefix": "k3s/weekly/" },
+      "Expiration": { "Days": 31 },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 2 } },
 
     { "ID": "preflight-tests-2d", "Status": "Enabled",
       "Filter": { "Prefix": "_preflight/" },
@@ -634,16 +617,23 @@ aws s3api get-bucket-lifecycle-configuration --bucket "$BUCKET" \
   --query 'Rules[].{ID:ID,Prefix:Filter.Prefix,Days:Expiration.Days}' --output table
 ```
 
-Three of those rules are worth understanding rather than just pasting:
+> ### 🚨 There is deliberately **no rule for `velero/`**
+>
+> Velero's file-system backups live in a Kopia repository whose objects reference each other, and
+> Velero expires them itself using the `ttl` on each Schedule. An S3 expiry rule would delete chunks
+> that a still-valid backup depends on — and the corruption only shows up when you try to restore.
+> **Never add a current-version expiry on `velero/`.** If you want a safety net there, use a
+> *noncurrent* version expiry only.
+
+The other two rules are worth understanding rather than just pasting:
 
 | Rule | Why it's there |
 |------|----------------|
-| `run-manifests-365d` | **The longest on purpose.** These record which K3s version made each backup. If they expired before the backups they describe, those backups become unidentifiable. Never shorten this below the others. |
-| `abort-stuck-uploads` | Our database upload is multi-part. If one dies halfway, the uploaded chunks sit there costing money and are invisible to `aws s3 ls`. This cleans them up. |
-| `NoncurrentVersionExpiration` | Versioning is on, so a same-name overwrite keeps the old copy forever. Our filenames have timestamps so this shouldn't normally trigger — it's a safety net. |
+| `abort-stuck-uploads` | Our `state.db` upload is multi-part. If one dies halfway, the uploaded chunks sit there costing money and are invisible to `aws s3 ls`. This cleans them up. |
+| `NoncurrentVersionExpiration` | Versioning is on, and job 1 uses fixed filenames inside a dated folder — so a re-run on the same day *does* create a noncurrent version. Two days is enough to recover from a bad overwrite without keeping them forever. |
 
-> The `_preflight/` rule is what tidies up after the preflight checker's test uploads, since the
-> backup login can't delete them itself.
+> The `_preflight/` rule tidies up after the preflight checker's test uploads, since the backup
+> login can't delete them itself.
 
 ### C.7 — Create the least-privilege login that lives on the server
 
@@ -754,9 +744,9 @@ aws iam list-user-policies --user-name k3-master-restore-reader
 ```
 
 Store the **reader** login somewhere safe, like a password manager or offline vault. Per
-[02 §5](02-backup-strategy.md#5-s3-storage-design), it must **never** be placed on `k3-master`.
-Also assign a named person to be responsible for rotating this
-([gap #8](05-gaps-and-open-questions.md#8-no-named-owner-for-credential-rotation), every 90 days)
+[02 §2](02-backup-strategy.md#bucket-security--not-optional), it must **never** be placed on
+`k3-master`. Also assign a named person to be responsible for rotating this
+([gap 7](05-gaps-and-open-questions.md#7-nobody-owns-rotating-the-s3-credentials), every 90 days)
 right now, rather than putting it off until Phase 6 — it only takes a few seconds while you're
 already setting this up.
 
@@ -889,7 +879,7 @@ rm -f /tmp/k3-egress-test.txt   # on the server
 
 ## Stage E — Install the backup script and do a test run `[node]`
 
-The script itself is [`scripts/k3s-track-a-backup.sh`](../scripts/k3s-track-a-backup.sh) in this
+The script itself is [`scripts/k3s-server-backup.sh`](../scripts/k3s-server-backup.sh) in this
 repo. Copy it over **from the repo**, don't just paste it into a text editor directly on the
 server — the repo is our one true copy, per our working agreement.
 
@@ -898,23 +888,23 @@ server — the repo is our one true copy, per our working agreement.
 From `[local]`, inside your own clone of this repo:
 
 ```bash
-scp scripts/k3s-track-a-backup.sh <user>@45.90.98.51:/tmp/
-scp scripts/systemd/k3s-backup@.service scripts/systemd/k3s-backup-db.timer \
-    scripts/systemd/k3s-backup-full.timer <user>@45.90.98.51:/tmp/
+scp scripts/k3s-server-backup.sh <user>@45.90.98.51:/tmp/
+scp scripts/systemd/k3s-backup.service scripts/systemd/k3s-backup.timer <user>@45.90.98.51:/tmp/
 ```
 
 Then on `[node]`:
 
 ```bash
-sudo install -m 0750 -o root -g root /tmp/k3s-track-a-backup.sh /usr/local/sbin/k3s-track-a-backup.sh
+sudo install -m 0750 -o root -g root /tmp/k3s-server-backup.sh /usr/local/sbin/k3s-server-backup.sh
+sudo install -m 0644 -o root -g root /tmp/k3s-backup.service /tmp/k3s-backup.timer /etc/systemd/system/
 sudo install -d -m 0700 -o root -g root /var/backups/k3s
 ```
 
 **Check:**
 
 ```bash
-bash -n /usr/local/sbin/k3s-track-a-backup.sh && echo "syntax OK"
-sudo /usr/local/sbin/k3s-track-a-backup.sh 2>&1 | head -2   # this should show a usage error, as expected
+bash -n /usr/local/sbin/k3s-server-backup.sh && echo "syntax OK"
+sudo /usr/local/sbin/k3s-server-backup.sh db 2>&1 | head -3   # should refuse: there are no modes any more
 ```
 
 ### E.2 — Write down the current state, so we can prove nothing changed
@@ -930,7 +920,7 @@ Save this output somewhere — Stage F will compare against it.
 ### E.3 — Test run: build every backup file, but upload nothing
 
 ```bash
-sudo DRY_RUN=1 /usr/local/sbin/k3s-track-a-backup.sh full
+sudo DRY_RUN=1 /usr/local/sbin/k3s-server-backup.sh
 ```
 
 **Check:**
@@ -939,26 +929,26 @@ sudo DRY_RUN=1 /usr/local/sbin/k3s-track-a-backup.sh full
 sudo ls -lah /var/backups/k3s/*/
 ```
 
-For a `full` run, you should see roughly these files:
+You should see exactly four artifacts, each with a `.sha256` next to it:
 
 | File | Roughly how big |
 |----------|---------------|
-| `state-*.db` | ~60–90 MB |
-| `server-identity-*.tar.gz` | small — a few hundred KB |
-| `config-*.tar.gz` | ~4 KB |
-| `manifests-*.tar.gz` | ~20 KB |
-| `node-config-*.tar.gz` | small |
-| `images-*.txt`, `image-digests-*.txt` | a few KB |
-| `manifest-*.json` | a few KB |
+| `state.db` | ~60–90 MB |
+| `k3s-identity.tar.gz` | small — a few hundred KB |
+| `node-config.tar.gz` | ~1 MB |
+| `MANIFEST.json` | a few KB |
 | a `.sha256` fingerprint file next to each one | ~100 bytes |
 
-And in the script's own output, you should see: `snapshot ok (read-only), integrity_check=ok`,
-followed by a line like `manifest: k3s=v1.34.5+k3s1 os=... artifacts=7`.
+Filenames carry no timestamp on purpose — the dated folder is the timestamp, so a re-run on the
+same day replaces that day's set cleanly instead of leaving half-matched files behind.
+
+In the script's own output you should see `snapshot ok (read-only), integrity_check=ok`, followed
+by a line like `manifest: k3s=v1.34.5+k3s1 os=... artifacts=3`.
 
 Check the manifest actually recorded a real version — this is the file a restore reads first:
 
 ```bash
-sudo python3 -m json.tool /var/backups/k3s/*/manifest-*.json | head -20
+sudo python3 -m json.tool /var/backups/k3s/*/MANIFEST.json | head -20
 ```
 
 > If `k3s_version` says `unknown`, the script couldn't read `/usr/local/bin/k3s`. Fix that before
@@ -991,57 +981,38 @@ df -h /
 
 ## Stage F — Do the first real backup `[node]`
 
-Do the small one first. If anything's wrong with the upload step, you'll find out from one 64 MB
-file, instead of from six different files at once.
+One run, one folder. The 64 MB `state.db` is the file that exercises the multipart upload path, so
+if the login is wrong you find out immediately rather than later.
 
 ```bash
-sudo /usr/local/sbin/k3s-track-a-backup.sh db
+sudo /usr/local/sbin/k3s-server-backup.sh
 ```
 
 **Check:**
 
 ```bash
 set -a; . /etc/k3s-backup/backup.env; set +a
-sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/cluster-state/db/"
-```
-
-Now do the full backup:
-
-```bash
-sudo /usr/local/sbin/k3s-track-a-backup.sh full
-```
-
-**Check — every folder from [02 §5](02-backup-strategy.md#5-s3-storage-design) should now have
-something in it:**
-
-```bash
 sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/" --recursive --human-readable
 ```
 
-Everything is filed in dated folders, so you'll see paths like
-`cluster-state/db/daily/2026/08/18/state-20260818T021500Z.db`.
-
-For a `full` run you should see files under all of these, each with a matching `.sha256`
-fingerprint file next to it:
+You should see one dated folder holding the complete set, each file with a matching `.sha256`:
 
 ```text
-cluster-state/db/daily/YYYY/MM/DD/
-cluster-state/server-identity/YYYY/MM/DD/
-config/YYYY/MM/DD/
-manifests/YYYY/MM/DD/
-node-config/YYYY/MM/DD/
-image-manifest/YYYY/MM/DD/
-run-manifests/YYYY/MM/DD/
+k3s/daily/2026-08-18/state.db
+k3s/daily/2026-08-18/k3s-identity.tar.gz
+k3s/daily/2026-08-18/node-config.tar.gz
+k3s/daily/2026-08-18/MANIFEST.json
 ```
 
-A `db` run writes only two of them — `cluster-state/db/6hourly/YYYY/MM/DD/` and
-`run-manifests/YYYY/MM/DD/`. That's correct, not a partial failure.
+**That folder is a complete restore set.** There is nothing to correlate across prefixes and no
+pairing to work out — a restore picks a date and takes everything in it.
 
-> Note the database tier: the daily `full` run writes to `db/daily/`, and the 6-hourly runs write
-> to `db/6hourly/`. They're separate folders so each can have its own retention rule.
+If today is a Sunday you'll see the same four files under `k3s/weekly/2026-08-18/` as well. That's
+the retention design, not a duplicate bug: two prefixes so two lifecycle rules can express
+7 daily + 4 weekly.
 
-Folders you *won't* see yet: `velero/` (that's Phase 2) and `argocd-export/` (that's Phase 3).
-That's expected at this stage.
+You *won't* see `velero/` yet — that's [Phase 2](04-implementation-todo.md#phase-2--job-2-velero),
+and until it exists no PVC data and no single deleted object can be restored.
 
 And once again, the thing that actually matters most:
 
@@ -1053,7 +1024,7 @@ sudo k3s kubectl get pods -A | grep -v Running | head
 
 You should see: the restart count unchanged, the node still `Ready`, and only the four
 already-known-broken demo apps from
-[01 §13](01-discovery-baseline.md#13-argocd) — `demo-app`, `nginx-app`, `nginx-app-dev`,
+[01 §13](01-discovery-baseline.md#13-argocd-deploys-our-apps-automatically-from-git) — `demo-app`, `nginx-app`, `nginx-app-dev`,
 `nginx-app11`. **Those were already broken before you started — ignore them, don't chase them
 down.**
 
@@ -1072,59 +1043,41 @@ export AWS_SECRET_ACCESS_KEY=<reader secret>
 export AWS_DEFAULT_REGION="$REGION"
 mkdir -p ~/k3-restore-check && cd ~/k3-restore-check
 
-# dated folders, so list with --recursive and take the full key
-DBKEY=$(aws s3 ls "s3://$BUCKET/cluster-state/db/" --recursive \
-          | grep '\.db$' | sort | tail -1 | awk '{print $4}')
-echo "$DBKEY"
-aws s3 cp "s3://$BUCKET/$DBKEY" .
-aws s3 cp "s3://$BUCKET/$DBKEY.sha256" .
-LATEST=$(basename "$DBKEY")
+# one folder = one complete restore set. Pick the newest date and take all of it.
+DATE=$(aws s3 ls "s3://$BUCKET/k3s/daily/" | awk '{print $2}' | tr -d '/' | sort | tail -1)
+echo "restoring from $DATE"
+aws s3 cp "s3://$BUCKET/k3s/daily/$DATE/" . --recursive
+ls -lah
 ```
 
-**Check the run manifest is there and usable ([#17](../../issues/17))**
+**Check the manifest is there and usable ([#17](../../issues/17))**
 
 This is the file a real restore opens first, so let's prove it works *before* we need it:
 
 ```bash
-MANKEY=$(aws s3 ls "s3://$BUCKET/run-manifests/" --recursive \
-           | grep '\.json$' | sort | tail -1 | awk '{print $4}')
-aws s3 cp "s3://$BUCKET/$MANKEY" .
-MAN=$(basename "$MANKEY")
-python3 -m json.tool "$MAN"
-```
-
-Confirm it names a real K3s version (not `unknown`), and lists the files we'd expect:
-
-```bash
-python3 - "$MAN" <<'PY'
+python3 - MANIFEST.json <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 print("K3s version :", d["k3s_version"])
 print("OS          :", d["os_release"])
-print("Backup type :", d["mode"], "  files:", d["artifact_count"])
-print("Pairs with  :", d["pairs_with_full_run"])
+print("Files       :", d["artifact_count"])
 assert d["k3s_version"] != "unknown", \
     "manifest has no K3s version - fix this before relying on these backups"
-assert d["pairs_with_full_run"] != "unknown", \
-    "manifest does not name a paired full run - run a full backup first"
 for a in d["artifacts"]:
-    print(f"  {a['s3_prefix']:32} {a['filename']:40} {a['bytes']:>12,}")
+    print(f"  {a['filename']:24} {a['bytes']:>12,}  {a['sha256'][:16]}...")
 PY
 ```
 
-Finally, cross-check one fingerprint end to end — the value inside the manifest must match the
-file we actually downloaded:
+**Check — every fingerprint still matches after the download:**
 
 ```bash
-grep -o '"sha256": "[a-f0-9]*"' "$MAN" | head -3
-sha256sum "$LATEST"
+sha256sum -c ./*.sha256
+LATEST=state.db
 ```
 
-**Check — the fingerprint should still match after downloading:**
-
-```bash
-sha256sum -c "$LATEST.sha256"
-```
+That one command verifies the whole set. It's also exactly what
+[restore step 1](03-restore-runbook.md#step-1--pick-a-backup-and-read-its-manifest) tells you to
+run during a real outage — so if it works here, it works there.
 
 **Check — this should be a valid, complete SQLite database, not a corrupted file:**
 
@@ -1143,16 +1096,20 @@ You should see `integrity_check: ok`, a table called `kine`, and a real, non-zer
 That row count is your proof this is actually a snapshot of the live cluster's data, not just an
 empty shell.
 
-**Check — the identity archive should contain what a real restore would need:**
+**Check — the identity archive contains what a real restore would need:**
 
 ```bash
-aws s3 cp "s3://$BUCKET/cluster-state/server-identity/$(aws s3 ls "s3://$BUCKET/cluster-state/server-identity/" | grep 'tar.gz$' | sort | tail -1 | awk '{print $4}')" .
-tar -tzf server-identity-*.tar.gz | head -40
-tar -tzf server-identity-*.tar.gz | wc -l
+tar -tzf k3s-identity.tar.gz | head -40
+tar -tzf k3s-identity.tar.gz | wc -l
+
+# the six things that must be in there
+for p in server/tls server/cred server/token server/manifests etc/rancher/k3s k3s.service; do
+  tar -tzf k3s-identity.tar.gz | grep -q "$p" && echo "OK   $p" || echo "MISSING  $p"
+done
 ```
 
-Compare this list against what you found in step B.1. It should be the exact same set of files —
-if not, the archive is missing something.
+Compare the `tls/` and `cred/` listings against what you found in step B.1 — it should be the exact
+same set of files. The archive is rooted at `/`, so a restore is a single `tar -xzf ... -C /`.
 
 ```bash
 cd ~ && rm -rf ~/k3-restore-check
@@ -1162,50 +1119,42 @@ unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
 > **A restore-time gotcha, worth remembering now:** the snapshot is one single, complete
 > `state.db` file. When restoring, place it at
 > `/var/lib/rancher/k3s/server/db/state.db` with **no `-wal` and no `-shm` file next to it**,
-> while K3s is stopped. If you leave an old, stale `-wal` file from the previous server sitting
-> next to a fresh snapshot, K3s can silently load the wrong data. This should be noted in
-> [03 — Restore Runbook](03-restore-runbook.md).
+> while K3s is stopped. If you leave an old, stale `-wal` file from the fresh install sitting
+> next to a restored snapshot, K3s can silently load the wrong data. This is
+> [restore step 4](03-restore-runbook.md#step-4--restore-the-cluster-identity-and-the-datastore).
 
 ---
 
 ## Stage H — Turn on the automatic schedule `[node]`
 
-Per [04, Phase 1](04-implementation-todo.md#phase-1--node--cluster-state-backup-track-a): we use
-systemd timers, matching how the server already schedules its one existing routine job.
-**No cron** — this server doesn't currently have any scheduled root jobs set up through cron, and
-we want to keep it that way.
+Per [04, Phase 1](04-implementation-todo.md#phase-1--job-1-k3s-server-backup): we use a systemd
+timer, matching how the server already schedules its one existing routine job. **No cron** — this
+server doesn't currently have any scheduled root jobs set up through cron, and we want to keep it
+that way.
+
+The two unit files were already installed in E.1. Reload and validate:
 
 ```bash
-sudo install -m 0644 -o root -g root /tmp/k3s-backup@.service        /etc/systemd/system/
-sudo install -m 0644 -o root -g root /tmp/k3s-backup-db.timer        /etc/systemd/system/
-sudo install -m 0644 -o root -g root /tmp/k3s-backup-full.timer      /etc/systemd/system/
 sudo systemctl daemon-reload
+sudo systemd-analyze verify /etc/systemd/system/k3s-backup.service
+sudo systemctl cat k3s-backup.service | head -20
 ```
 
-**Check that the files themselves are valid before turning anything on:**
+Test the scheduled job by hand once — this is exactly the path the timer will follow later:
 
 ```bash
-sudo systemd-analyze verify /etc/systemd/system/k3s-backup@.service
-sudo systemctl cat k3s-backup@db.service | head -20
+sudo systemctl start k3s-backup.service
+sudo systemctl status k3s-backup.service --no-pager
+sudo journalctl -u k3s-backup.service -n 40 --no-pager
 ```
 
-Test the scheduled job by hand once — this is exactly the path the automatic schedule will
-follow later:
+**Check:** `Main PID: ... (code=exited, status=0/SUCCESS)`, and the log ends with
+`completed successfully`.
+
+Only now, turn the schedule on:
 
 ```bash
-sudo systemctl start k3s-backup@db.service
-sudo systemctl status k3s-backup@db.service --no-pager
-sudo journalctl -u k3s-backup@db.service -n 40 --no-pager
-```
-
-**Check:** you should see `Main PID: ... (code=exited, status=0/SUCCESS)`, and the log should end
-with `completed successfully`.
-
-Only now, turn the automatic schedule on:
-
-```bash
-sudo systemctl enable --now k3s-backup-db.timer
-sudo systemctl enable --now k3s-backup-full.timer
+sudo systemctl enable --now k3s-backup.timer
 ```
 
 **Check:**
@@ -1214,44 +1163,41 @@ sudo systemctl enable --now k3s-backup-full.timer
 systemctl list-timers 'k3s-backup*' --all --no-pager
 ```
 
-You should see `k3s-backup-db.timer` scheduled next at the coming 00/06/12/18:20 UTC slot, and
-`k3s-backup-full.timer` at 02:15 UTC. These two are timed so they never run at exactly the same
-moment — and even if they somehow did, the script has a built-in lock to prevent them from
-colliding.
+You should see `k3s-backup.timer` scheduled next at 02:15 UTC. That's 45 minutes ahead of the
+Velero schedule you'll add in Phase 2, so the SQLite reader and Velero's node-agent are never on the
+disk at the same time. The script also takes a lock, so a slow run can never overlap the next one.
 
 ---
 
 ## Stage I — Let it run for a while `[node]`, then close out the issues
 
-Per [04, Phase 4](04-implementation-todo.md#phase-4--automation--retention): **let this run on
+Per [04, Phase 3](04-implementation-todo.md#phase-3--retention-and-alerting): **let this run on
 its own for one full week before actually relying on it.**
 
 Check daily, takes about 30 seconds:
 
 ```bash
 systemctl list-timers 'k3s-backup*' --no-pager
-journalctl -u 'k3s-backup@*' --since '24 hours ago' --no-pager | tail -30
+journalctl -u k3s-backup.service --since '24 hours ago' --no-pager | tail -30
 df -h /
 ```
 
 ```bash
-sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/cluster-state/db/" | tail -5
+sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/k3s/daily/" | tail -8
 ```
 
-You should see **4 new database backup files per day**, plus one of everything else once a day.
+You should see **one new dated folder per day**, and one more under `k3s/weekly/` after the first
+Sunday.
 
 Also keep an eye on, specifically:
 
-- **How much free disk space is left.** The script automatically deletes anything older than 3
-  days from its temporary staging area, and refuses to run at all if less than 2 GB is free — but
-  a job running every 6 hours on a disk that's already 64% full deserves a week of close
-  attention.
-- **How much is piling up in S3.** There are no auto-cleanup rules yet (that's Phase 4), so
-  nothing ever gets deleted automatically, and since versioning is on, even overwritten files
-  stick around. At roughly 80 MB per snapshot × 4 times a day, that's **about 320 MB/day, or
-  9–10 GB/month — and it just keeps growing.** Setting up the
-  [cleanup rules](02-backup-strategy.md#retention-matrix) before this becomes a real cost on our
-  AWS bill is the single strongest reason not to let Phase 4 slip.
+- **How much free disk space is left.** The script deletes anything older than 3 days from its
+  staging area and refuses to run at all if less than 2 GB is free — but a new job on a disk that's
+  already 64% full deserves a week of attention.
+- **How much is piling up in S3.** If you set up the two lifecycle rules in C.6a, this stays flat
+  at roughly 1 GB. If you skipped them, nothing is ever deleted and versioning means overwrites
+  pile up too — at ~90 MB a day that's ~2.7 GB/month, growing without limit. See
+  [02 §6](02-backup-strategy.md#6-retention--7-daily--4-weekly).
 
   > **Decision made: no compression.** We upload the database snapshot uncompressed on purpose,
   > so it can be checked — and restored — directly, with no extra decompress step needed during
@@ -1278,8 +1224,8 @@ added."
 
 | Stage | How to undo it |
 |-------|-----------------|
-| H | `sudo systemctl disable --now k3s-backup-db.timer k3s-backup-full.timer` then `sudo rm /etc/systemd/system/k3s-backup*` and `daemon-reload` |
-| E–F | `sudo rm -f /usr/local/sbin/k3s-track-a-backup.sh; sudo rm -rf /var/backups/k3s` |
+| H | `sudo systemctl disable --now k3s-backup.timer` then `sudo rm /etc/systemd/system/k3s-backup.*` and `daemon-reload` |
+| E–F | `sudo rm -f /usr/local/sbin/k3s-server-backup.sh; sudo rm -rf /var/backups/k3s` |
 | D | `sudo rm -rf /etc/k3s-backup` — then disable the writer login: `aws iam delete-access-key --user-name k3-master-backup-writer --access-key-id <id>` |
 | C | `aws s3 rm s3://$BUCKET --recursive`, `aws s3api delete-bucket --bucket $BUCKET`, delete both IAM users, then `aws kms schedule-key-deletion --key-id $KEY_ID --pending-window-in-days 30` |
 | A–B | Nothing to undo — these steps only read information, never changed anything. |
@@ -1288,8 +1234,8 @@ added."
 low priority, and it only ever reads from K3s's data, never writes to it):
 
 ```bash
-sudo systemctl stop 'k3s-backup@*'
-sudo systemctl disable --now k3s-backup-db.timer k3s-backup-full.timer
+sudo systemctl stop k3s-backup.service
+sudo systemctl disable --now k3s-backup.timer
 ```
 
 That stops the backup completely. It doesn't touch K3s at all. There's nothing to "undo" on the
@@ -1301,17 +1247,15 @@ K3s side, because the script never writes to it in the first place.
 
 Let's be honest about what's still missing while these phases are the only ones done:
 
-| Not covered yet | Which phase covers it | What that means for us right now |
+| Not covered yet | Covered by | What that means right now |
 |-----------------|-------------|-------------------|
-| Backing up Kubernetes objects at the object level (via Velero) | Phase 2 | We can rebuild **this specific server**. We can't yet restore into a brand new cluster or a different K3s version — [02, item 5](02-backup-strategy.md#component-5--kubernetes-resource-state) explains that the SQLite backup only helps if we rebuild the exact same server. |
-| App data on disk (the 6 monitoring data volumes, ~7.8 GB) | Phase 2 | Our Prometheus/Loki/Grafana history is **not backed up at all** right now. |
-| ArgoCD's exported settings | Phase 3 | ArgoCD's own config, secrets, and any manually-created Apps can't be recovered from Git alone. |
-| Automatic cleanup of old backups | Phase 4 | Storage use keeps growing forever, with no limit. |
-| Alerts when a backup fails | Phase 4 | The script does write a "last successful backup" timestamp if our monitoring tool's file-collector feature exists, but **nothing actually alerts on it yet**. A silently failing backup would stay silent. |
-| Ever actually testing a restore | Phase 5 | *A backup that's never been restored is just a hope, not an actual plan.* |
-| Any backup plan if a restore itself goes wrong | — | The server is on-premise with **no hosting-provider snapshot**
-([gap 1](05-gaps-and-open-questions.md#1-hosting-provider--resolved-datalix-treated-as-on-premise)).
-There's nothing else behind our S3 bucket as a fallback. |
+| **PVC data** — the 6 monitoring volumes, ~7.8 GB | Phase 2 (Velero) | Prometheus/Loki/Grafana history is **not backed up at all**. A restore brings the monitoring stack back empty. |
+| **Restoring one deleted object** | Phase 2 | No way to put back a single Deployment or Secret. The only lever is rolling the whole datastore back, which reverts everything else too. And because `local-path` deletes a volume's files the instant its PVC goes, an accidental `kubectl delete pvc` is **permanent** today. |
+| **Restoring into a fresh or different-version cluster** | Phase 2 | Job 1's snapshot only helps when rebuilding **this** server at **this** K3s version. |
+| Automatic cleanup of old backups | Phase 3 | Only if you skipped C.6a — otherwise this is already done. |
+| Alerts when a backup fails | Phase 3 | The script writes a "last success" timestamp if node-exporter's textfile directory exists, but **nothing alerts on it yet**. A silently failing backup stays silent. |
+| Ever actually testing a restore | Phase 4 | *A backup that's never been restored is a hope, not a plan.* |
+| A fallback if a restore itself goes wrong | — | On-premise, **no hosting-provider snapshot** ([05](05-gaps-and-open-questions.md)). There's nothing behind the S3 bucket. |
 
-Finishing Phase 1 means **our server-level backup (Track A) works.** It does **not** yet mean
-we're fully recoverable. Move on to [#11](../../issues/11) next.
+Finishing Phase 1 means **job 1 works** — this server can be rebuilt. It does **not** mean we're
+recoverable: half the design is job 2. Move on to [#11](../../issues/11) next.

@@ -4,7 +4,7 @@ This explains how a new developer can clone and push to this private repo, using
 key they were given.
 
 > **This document never contains the actual key itself, and never should.** The private key file
-> gets sent to you separately. See [Handover](#handover-for-whoever-issues-the-key) at the bottom
+> gets sent to you separately. See [Handover](#handover-for-whoever-is-issuing-a-new-key-to-someone) at the bottom
 > if you're the one issuing a key to someone else.
 
 ---

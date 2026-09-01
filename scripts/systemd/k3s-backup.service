@@ -1,5 +1,5 @@
 [Unit]
-Description=K3s Track A backup (%i)
+Description=K3s server backup (datastore, identity, config) — job 1 of 2
 Documentation=https://github.com/bsarkarlabs-stack/k3-backup/blob/main/docs/02-backup-strategy.md
 # Ordering only. This does NOT prevent the backup running while k3s is down —
 # and that is intentional: a snapshot taken with k3s stopped is more consistent,
@@ -10,7 +10,7 @@ Requires=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/k3s-backup/backup.env
-ExecStart=/usr/local/sbin/k3s-track-a-backup.sh %i
+ExecStart=/usr/local/sbin/k3s-server-backup.sh
 
 # Never compete with the control plane for CPU or disk.
 Nice=10

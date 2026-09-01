@@ -32,13 +32,27 @@ Exit `0` = ready, `2` = ready with warnings, `1` = don't run the backup yet.
 > If the server dies: get a fresh Ubuntu server → install the same version of K3s → restore our
 > backup → check everything works.
 
+## The whole design, in one table
+
+Two jobs. One bucket. Two folders. Daily. Nothing else runs on a schedule.
+
+| | Job 1 — K3s server backup | Job 2 — Velero |
+|---|---|---|
+| Runs | 02:15 UTC daily, systemd timer on the node | 03:00 UTC daily (+ 04:00 Sunday), inside the cluster |
+| Backs up | SQLite datastore, cluster identity (`tls/` `cred/` `token` `manifests/`), K3s config, host OS config | Every Kubernetes object in every namespace, **plus all PVC data** |
+| Restores | This server, rebuilt from bare metal | Any cluster — and it's the only thing that brings PVC data or a single deleted object back |
+| Lands in | `s3://k3-master-dr/k3s/` | `s3://k3-master-dr/velero/` |
+| Retention | S3 lifecycle: 7 daily + 4 weekly | Velero TTL: 7 daily + 4 weekly |
+
+Full detail: [02 — Backup Strategy](docs/02-backup-strategy.md).
+
 ## Read the docs in this order
 
 | # | Document | In plain words |
 |---|----------|-----------------|
 | 01 | [Discovery Baseline](docs/01-discovery-baseline.md) | Everything we checked and confirmed about the server as it is today. This is the "facts" document — nothing is guessed. |
-| 02 | [Backup Strategy](docs/02-backup-strategy.md) | What we back up, why, how often, and where it goes in S3. |
-| 03 | [Restore Runbook](docs/03-restore-runbook.md) | Step-by-step: what to do, in order, to bring the server back from a backup. |
+| 02 | [Backup Strategy](docs/02-backup-strategy.md) | The two jobs: what they back up, when, where it goes, and how long it's kept. |
+| 03 | [Restore Runbook](docs/03-restore-runbook.md) | Two flows — full server rebuild, and restoring one PVC or one deleted object. |
 | 04 | [Implementation TODO](docs/04-implementation-todo.md) | The build plan, broken into phases. Matches our GitHub Issues. |
 | 05 | [Gaps & Open Questions](docs/05-gaps-and-open-questions.md) | Things we still don't know for sure. Don't assume — read this first if something is unclear. |
 | 06 | [Developer Access](docs/06-developer-access.md) | How a new developer gets permission to clone and push to this repo. |
@@ -48,14 +62,14 @@ Exit `0` = ready, `2` = ready with warnings, `1` = don't run the backup yet.
 | Task | Status |
 |------|--------|
 | Checked and wrote down everything about the server | ✅ Done |
-| Decided how backups should work | ✅ Done (written down, not yet tested) |
-| Wrote the step-by-step restore guide | ✅ Done (written down, not yet tested) |
+| Decided how backups should work | ✅ Done — simplified to two jobs |
+| Wrote both restore flows | ✅ Done (written down, **not yet tested**) |
+| Job 1 script + systemd timer | ✅ Written, ⏳ not deployed |
+| Job 2 Velero install + schedules | ✅ Written, ⏳ not installed |
 | Created the S3 bucket + permissions | ⏳ Not done yet |
-| Script that backs up the cluster automatically | ⏳ Not done yet |
-| Velero (backs up apps, secrets, and disks) | ⏳ Not installed yet |
-| Auto-delete old backups after some time | ⏳ Not set up yet |
+| Auto-delete old backups (7 daily + 4 weekly) | ⏳ Not set up yet |
 | Alert us if a backup fails | ⏳ Not set up yet |
-| Actually testing a full restore | ⏳ Never done yet |
+| Actually testing a restore | ⏳ **Never done yet** |
 
 ## Where the work is tracked
 
@@ -66,45 +80,37 @@ they were created at different times.)
 
 | Phase | What it covers | How urgent | Issue |
 |-------|-----------------|------------|-------|
-| 0 — Get ready: S3 bucket, permissions, install a small tool | Highest | [#9](../../issues/9) |
-| 1 — Back up the server itself (files, database, certificates) | Highest | [#10](../../issues/10) |
-| 2 — Back up what's running inside K3s (apps, secrets, disks) with Velero | Highest | [#11](../../issues/11) |
-| 3 — Back up ArgoCD's own settings | Medium | [#1](../../issues/1) |
-| 4 — Auto-delete old backups + alert us on failure | Medium | [#2](../../issues/2) |
-| 5 — Actually test a full restore | Medium | [#12](../../issues/12) |
-| 6 — Fix the smaller unknowns | Low | [#3](../../issues/3) |
+| 0 — S3 bucket, encryption key, the two logins | Highest | [#9](../../issues/9), [#14](../../issues/14) |
+| 1 — Job 1: deploy the K3s server backup + timer | Highest | [#10](../../issues/10) |
+| 2 — Job 2: install Velero + the two schedules | Highest | [#11](../../issues/11) |
+| 3 — Retention rules + "did the backup arrive?" alerting | Medium | [#2](../../issues/2) |
+| 4 — Actually test both restore flows | Medium | [#12](../../issues/12) |
+| 5 — Close the remaining unknowns | Low | [#3](../../issues/3) |
 
-### Known unknowns (gaps)
+### Blocking unknowns — the three that could make this design wrong
 
-| What we don't know yet | How urgent | Issue |
+| What we don't know | Why it blocks | Issue |
 |------|------------|-------|
-| Backups will contain real secrets — the S3 bucket must be encrypted | **Highest** | [#14](../../issues/14) |
-| Where our HTTPS/SSL certificates actually come from | Medium | [#4](../../issues/4) |
-| The server's network/firewall/login settings aren't backed up yet | Medium | [#5](../../issues/5) |
-| Two specific certificate folders were never checked in detail | Medium | [#8](../../issues/8) |
-| We're not 100% sure who hosts this server | Low | [#13](../../issues/13) |
-| List of installed system software isn't saved anywhere | Low | [#6](../../issues/6) |
-| All backups sit in one AWS region only, no backup-of-the-backup | Low | [#15](../../issues/15) |
-| Keep this documentation in Git, never only on the server | Low | [#7](../../issues/7) |
-| Nobody is assigned to rotate backup passwords/keys regularly | Low | [#16](../../issues/16) |
+| Where our HTTPS certificates come from. If Traefik keeps `acme.json` in temporary storage, **nothing backs it up** and a restore silently comes back with broken HTTPS | A clean restore | [#4](../../issues/4) |
+| Whether Velero's node-agent can actually read our volumes. A path mismatch backs up **nothing** and still looks like success | Every PVC and single-object restore | [#11](../../issues/11) |
+| Nothing has ever been restored | Knowing any of this works | [#12](../../issues/12) |
 
-### Things a K3s review turned up
+The rest — crash-consistency of the monitoring volumes, K3s secret encryption, alerting, credential
+rotation, single-region — are in [05 — Gaps](docs/05-gaps-and-open-questions.md).
 
-Found by reviewing the backup script and docs against how K3s actually behaves.
+### Decided and closed
 
-| What was wrong | How urgent | Issue | Where it stands |
-|----------------|------------|-------|-----------------|
-| Backups never recorded which K3s version made them — so a restore had to guess | **Highest** | [#17](../../issues/17) | Fixed in this repo, still needs deploying to the server |
-| The restore runbook told you to use tools we haven't built yet | Medium | [#18](../../issues/18) | Fixed |
-| Nobody had written down that K3s certificate errors after a restore usually fix themselves | Medium | [#19](../../issues/19) | Fixed |
-| Do we actually need the ArgoCD settings export, or does Velero cover it? | Medium | [#20](../../issues/20) | **Open — needs a decision** |
-| The backup login couldn't upload our 64 MB database — and the test wouldn't have caught it | **Highest** | [#21](../../issues/21) | Fixed |
-| Our "backup succeeded" signal may be written where nothing reads it | Medium | [#22](../../issues/22) | **Open — needs a check on the server** |
-| Database-only backups didn't say which full backup they pair with | Medium | [#23](../../issues/23) | Fixed |
-| A bare KMS key ID instead of the full ARN would deny every upload | Low | [#24](../../issues/24) | Fixed |
+| Question | Decision |
+|----------|----------|
+| Do we need a daily ArgoCD export? ([#20](../../issues/20), [#1](../../issues/1)) | **No.** Velero backs up the `argocd` namespace including its Secrets and Applications; Git holds the app definitions. Verify once in Phase 2 |
+| How do we know which K3s version made a backup? ([#17](../../issues/17)) | `MANIFEST.json`, in the same folder as the files it describes |
+| Which files belong to the same backup run? ([#23](../../issues/23)) | One run a day, one folder, one complete set — the question no longer arises |
+| Server OS settings not backed up ([#5](../../issues/5), [#6](../../issues/6)) | Folded into Job 1 as `node-config.tar.gz` |
+| The 64 MB upload failure ([#21](../../issues/21)) and bare-ARN denial ([#24](../../issues/24)) | Fixed; the preflight catches both |
+| Certificate errors after a restore ([#19](../../issues/19)) | Documented — most of them fix themselves, and the runbook says which don't |
 
-**Where to start:** [#9](../../issues/9) → [#10](../../issues/10) / [#11](../../issues/11) →
-[#1](../../issues/1) → [#2](../../issues/2) → [#12](../../issues/12)
+**Where to start:** [#9](../../issues/9) → [#10](../../issues/10) → [#11](../../issues/11) →
+[#2](../../issues/2) → [#12](../../issues/12)
 
 ## Our server, in short
 
@@ -127,10 +133,14 @@ database) lives in `/var/lib/rancher/k3s/server/`. If we lose that folder withou
 cannot cleanly bring the cluster back — every existing connection and login would need to be
 re-issued from scratch.
 
-**Rule:** always back up `/var/lib/rancher/k3s/server/` as one complete folder, including its
+**Rule:** always back up `/var/lib/rancher/k3s/server/` as one complete unit, including its
 `tls` and `cred` subfolders (some earlier notes forgot these two). See
-[Backup Strategy §2](docs/02-backup-strategy.md#2-the-correction-that-changes-the-whole-plan) for
-the full explanation.
+[Backup Strategy §1](docs/02-backup-strategy.md#1-the-thing-to-understand-before-anything-else).
+
+**The other half:** Job 1 cannot restore a deleted PVC or a deleted Secret. `local-path` deletes a
+volume's files the instant its PVC goes away — no grace period. **Velero is the only thing standing
+between an accidental `kubectl delete pvc` and permanent loss**, which is why Phase 2 is not
+optional.
 
 ## Ground rules for this repo
 

@@ -252,31 +252,26 @@ else
       if [ -n "$LC" ]; then
         pass "lifecycle rules are configured"
 
-        for p in cluster-state/db/6hourly/ cluster-state/db/daily/ \
-                 cluster-state/server-identity/ node-config/ run-manifests/; do
+        # Exactly two rules are expected: 7 daily + 4 weekly. See docs/02 §6.
+        for p in k3s/daily/ k3s/weekly/; do
           case " $LC " in
             *" $p "*) : ;;
             *) warn "no lifecycle rule covers $p — that folder will grow without limit" \
-                    "# see docs/07 Stage C.6a for the full rule set" ;;
+                    "# see docs/07 Stage C.6a for the two-rule set" ;;
           esac
         done
 
-        # run-manifests must outlive everything it describes
-        RM_DAYS=$(aws s3api get-bucket-lifecycle-configuration --bucket "$S3_BUCKET" \
-                    --query "Rules[?Filter.Prefix=='run-manifests/'].Expiration.Days | [0]" \
-                    --output text 2>/dev/null)
-        MAX_OTHER=$(aws s3api get-bucket-lifecycle-configuration --bucket "$S3_BUCKET" \
-                    --query "max(Rules[?Filter.Prefix!='run-manifests/' && Filter.Prefix!='_preflight/'].Expiration.Days)" \
-                    --output text 2>/dev/null)
-        if [ -n "$RM_DAYS" ] && [ "$RM_DAYS" != "None" ] \
-           && [ -n "$MAX_OTHER" ] && [ "$MAX_OTHER" != "None" ]; then
-          if [ "${RM_DAYS%.*}" -ge "${MAX_OTHER%.*}" ]; then
-            pass "run-manifests (${RM_DAYS%.*}d) outlives every other rule (${MAX_OTHER%.*}d)"
-          else
-            fail "run-manifests expires after ${RM_DAYS%.*} days but backups are kept ${MAX_OTHER%.*} days — surviving backups would become unidentifiable" \
-                 "# raise the run-manifests/ rule to at least ${MAX_OTHER%.*} days (docs/07 Stage C.6a)"
-          fi
-        fi
+        # A lifecycle rule on velero/ is actively destructive: Velero's file-system
+        # backups live in a Kopia repository whose objects reference each other, and
+        # it expires them itself by TTL. An S3 expiry deletes chunks that valid
+        # backups still depend on, and the damage only surfaces during a restore.
+        case " $LC " in
+          *" velero"*)
+            fail "a lifecycle rule covers velero/ — this will silently corrupt Velero backups" \
+                 "# remove any rule whose prefix starts with velero/ (docs/02 §6).
+       Velero expires its own backups by TTL. If you want a safety net there,
+       use a NONCURRENT version expiry, never a current-version one." ;;
+        esac
 
         aws s3api get-bucket-lifecycle-configuration --bucket "$S3_BUCKET" \
           --query "Rules[?AbortIncompleteMultipartUpload].ID" --output text 2>/dev/null \
@@ -285,8 +280,9 @@ else
           || warn "no AbortIncompleteMultipartUpload rule — a failed 64 MB upload leaves chunks that cost money and don't show in 'aws s3 ls'" \
                   "# see docs/07 Stage C.6a"
       else
-        warn "NO lifecycle rules — nothing is ever deleted. At ~320 MB/day that is ~114 GB after a year, growing without limit" \
-             "# see docs/07 Stage C.6a for the rule set (keeps it at ~3.7 GB)"
+        warn "NO lifecycle rules — nothing under k3s/ is ever deleted, so the bucket grows without limit" \
+             "# see docs/07 Stage C.6a — two rules: k3s/daily/ expire 8 days,
+       # k3s/weekly/ expire 31 days. Nothing on velero/ (Velero uses TTL)."
       fi
     else
       fail "bucket s3://$S3_BUCKET does not exist or is not reachable" \
@@ -528,38 +524,36 @@ section "F. Coverage — what today's backup does NOT recover"
 # ===========================================================================
 
 cat <<'EOF'
-  Covered by the Track A backup script (what we have today):
+  Job 1 — k3s-server-backup.sh — covers:
 
-    [x] K3s datastore (state.db)          -> rebuilds THIS server
-    [x] Cluster identity (tls/, cred/)    -> certificates and join key
-    [x] Server token                      -> unlocks the datastore's bootstrap data
-    [x] K3s config + systemd unit
+    [x] K3s datastore (state.db)       -> rebuilds THIS server
+    [x] Cluster identity (tls/, cred/) -> certificate authority and join key
+    [x] Server token                   -> unlocks the datastore's bootstrap data
+    [x] K3s config + systemd unit      -> including --tls-san and start flags
     [x] Built-in setup files (manifests/)
-    [x] Server OS settings (node-config/) -> network, firewall, ssh, packages
-    [x] Container image list
-    [x] Run manifest                      -> which k3s version, which files pair up
+    [x] Host OS settings               -> network, firewall, ssh, packages
+    [x] MANIFEST.json                  -> which k3s version made this backup
 
-  NOT covered — verify you accept this before relying on the backup:
+  Job 2 — Velero — covers everything Job 1 cannot:
 
     [ ] PVC data (the volumes listed in section E)
-          Nothing backs up their contents. A restore brings the monitoring
-          stack back EMPTY. Blocked on issue #11 (Velero).
+          Job 1 does NOT back up their contents. Without Velero, a restore
+          brings the monitoring stack back EMPTY. Issue #11.
 
     [ ] Restoring a single deleted object
-          No way to put back one Deployment or Secret. The only lever is
-          rolling the whole datastore back, which reverts everything else
-          too. Blocked on #11.
+          Without Velero there is no way to put back one Deployment or
+          Secret — the only lever is rolling the whole datastore back, which
+          reverts everything else too. Issue #11.
 
     [ ] Restoring into a fresh or different-version cluster
           The datastore snapshot only helps when rebuilding THIS server at
-          THIS k3s version. Blocked on #11.
+          THIS k3s version. Issue #11.
 
-    [ ] ArgoCD settings as a separate export
-          Comes back only via the restored datastore. See #1 and #20.
+  If Velero is not installed yet, everything under Job 2 is uncovered today.
 
   Reminder about the storage: the local-path reclaim policy is Delete, so
   deleting a PVC destroys its data immediately — no grace period, nothing to
-  recover from. Until #11 exists, an accidental `kubectl delete pvc` is
+  recover from. Until Velero exists, an accidental `kubectl delete pvc` is
   permanent.
 EOF
 
@@ -596,6 +590,6 @@ elif [ "$WARNS" -gt 0 ]; then
   exit 2
 else
   printf '  %sREADY%s — everything checks out. Next step:\n' "$c_grn" "$c_off"
-  printf '    sudo DRY_RUN=1 /usr/local/sbin/k3s-track-a-backup.sh full\n'
+  printf '    sudo DRY_RUN=1 /usr/local/sbin/k3s-server-backup.sh\n'
   exit 0
 fi

@@ -1,0 +1,39 @@
+# Job 2 of 2 — everything inside the cluster, including PVC data.
+#
+# Runs 45 minutes after the k3s server backup so the two jobs never contend
+# for the disk. TTL is what expires these backups: Velero deletes its own
+# objects, which is why the credential needs s3:DeleteObject on velero/* and
+# why there must be NO S3 lifecycle rule on that prefix.
+#
+#   kubectl apply -f schedule-daily.yaml
+#
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: daily
+  namespace: velero
+spec:
+  schedule: "0 3 * * *"
+  useOwnerReferencesInBackup: false
+  template:
+    # 168h = 7 days -> 7 daily restore points.
+    ttl: 168h0m0s
+
+    # No includedNamespaces: every namespace, present and future. A new
+    # namespace must never be able to appear without being backed up.
+    includeClusterResources: true
+
+    # local-path has no volume snapshot support and a Delete reclaim policy,
+    # so file-system backup through the node-agent is the only method that
+    # works. Opt-out per pod if something ever needs excluding — never
+    # opt-in, or a new PVC ships silently unprotected.
+    defaultVolumesToFsBackup: true
+
+    # There are no CSI snapshots on this cluster; asking for them only
+    # produces noise in the backup logs.
+    snapshotVolumes: false
+
+    storageLocation: default
+    metadata:
+      labels:
+        tier: daily

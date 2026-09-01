@@ -33,11 +33,12 @@ What needs to happen:
 **Priority: Highest**
 
 What needs to happen:
-- Script that safely backs up the K3s database (already written: `scripts/k3s-track-a-backup.sh`)
-- Archive certs, config, node settings
-- Upload to S3 with checksums
-- Schedule via systemd timer
-- Deploy the script onto `k3-master` and confirm a real run works
+- Deploy `scripts/k3s-server-backup.sh` + `scripts/systemd/k3s-backup.{service,timer}` (both
+  already written) onto `k3-master`
+- Confirm a dry run produces `state.db`, `k3s-identity.tar.gz`, `node-config.tar.gz`,
+  `MANIFEST.json` and their `.sha256` files
+- Confirm one real run lands in `s3://k3-master-dr/k3s/daily/YYYY-MM-DD/`
+- `systemctl enable --now k3s-backup.timer`
 
 **Answer / Output:**
 ```
@@ -47,14 +48,18 @@ What needs to happen:
 ---
 
 ### 3. [#11](../../issues/11) — Phase 2: Install Velero
-**Priority: Highest — currently not done at all**
+**Priority: Highest — currently not done at all. This is half the design.**
 
 What needs to happen:
-- Install Velero + S3 plugin, pointed at the same bucket
-- Turn on node-agent (needed for our storage type)
-- Daily schedule covering every namespace
-- Confirm the 6 monitoring data volumes are included
-- Do one test restore
+- Run `scripts/velero/install-velero.sh` — Velero + AWS plugin, node-agent on, `prefix=velero`
+- Apply `schedule-daily.yaml` and `schedule-weekly.yaml`
+- **Verify the node-agent really reads the volumes:** `velero backup describe <name> --details`
+  must list all six monitoring PVCs under *Pod Volume Backups*. An empty list is a silent
+  total failure that still reports success
+- Confirm the `argocd` namespace backup contains its Secrets and Applications — this is what
+  retires the separate ArgoCD export (#20, #1)
+- Do one test restore into a scratch namespace
+- Confirm old backups actually expire after their TTL (proves `s3:DeleteObject` is granted)
 
 **Answer / Output:**
 ```
@@ -63,12 +68,17 @@ What needs to happen:
 
 ---
 
-### 4. [#1](../../issues/1) — Phase 3: ArgoCD / Git recoverability
-**Priority: Medium**
+### 4. [#1](../../issues/1) / [#20](../../issues/20) — ArgoCD recoverability
+**Priority: Medium — decision made, one thing left to verify**
 
-What needs to happen:
-- Confirm every ArgoCD App is defined in Git, not created by hand
-- Schedule daily `argocd admin export` to S3
+**Decided: no separate daily `argocd admin export`.** Velero backs up the whole `argocd` namespace
+including its Secrets, Applications and AppProjects, and Git holds the app definitions. The export
+would be duplicate coverage.
+
+What's left:
+- Confirm every ArgoCD App is defined in Git, not created by hand (anything hand-made can't come
+  back from Git alone — it comes back from Velero)
+- Verify the Velero backup really contains ArgoCD's Secrets and Applications, as part of #11
 - Write down which Git repos/logins ArgoCD depends on
 
 **Answer / Output:**
@@ -78,15 +88,18 @@ What needs to happen:
 
 ---
 
-### 5. [#2](../../issues/2) — Phase 4: Auto-cleanup + alerting
+### 5. [#2](../../issues/2) — Phase 3: Retention + alerting
 **Priority: Medium**
 
 What needs to happen:
-- S3 lifecycle rules so old backups auto-delete
-- Each backup job reports a "last success" timestamp
-- Alert via existing Alertmanager if a backup goes stale
-- Actually test the alert by breaking a backup on purpose
-- Let everything run untouched for one week
+- Exactly two S3 lifecycle rules: `k3s/daily/` expire 8 days, `k3s/weekly/` expire 31 days
+- **Confirm there is no lifecycle rule on `velero/`** — one would silently corrupt Velero's Kopia
+  repository, and you'd only find out during a restore
+- Alert on the **age of the newest object** under `k3s/daily/` (~36 h threshold) — this proves the
+  backup arrived, unlike the script's own success metric
+- Alert on `velero_backup_last_successful_timestamp`
+- Actually test both alerts by breaking a run on purpose
+- Let both jobs run untouched for one week
 
 **Answer / Output:**
 ```
@@ -152,10 +165,12 @@ Need to check if Traefik's certificates are Kubernetes Secrets, or issued automa
 
 ---
 
-### 10. [#5](../../issues/5) — Server OS-level settings not backed up
-**Priority: Medium / High**
+### 10. [#5](../../issues/5) / [#6](../../issues/6) — Server OS-level settings not backed up
+**Priority: Medium — resolved in the design, needs one confirming run**
 
-Network settings, firewall rules, SSH keys, timezone — not yet captured automatically.
+Network settings, firewall rules, SSH keys, timezone and the installed-package list are now
+captured by job 1 as `node-config.tar.gz`, in the same folder as everything else — no separate job,
+no separate prefix. Confirm the file appears in the first real backup and contains what you expect.
 
 **Answer / Output:**
 ```
@@ -243,9 +258,10 @@ login credentials.
 ### 17. [#17](../../issues/17) — Backups never recorded which K3s version made them
 **Priority: Highest — fixed in code, not yet deployed**
 
-Fixed by adding a `run-manifests/manifest-<timestamp>.json` file to every backup run, recording
-the K3s version and every file's checksum. Still needs to actually be deployed to `k3-master`
-and confirmed working.
+Fixed by writing a `MANIFEST.json` into every backup run's folder, recording the K3s version, the
+OS release and every file's checksum. It now lives beside the files it describes rather than in its
+own prefix, so it can't expire before them. Still needs to be deployed to `k3-master` and confirmed
+working.
 
 **Answer / Output:**
 ```
@@ -282,11 +298,14 @@ expiry dates from `k3-master` (Stage B.1 in doc 07) — nobody has run that chec
 ---
 
 ### 20. [#20](../../issues/20) — Do we actually need the ArgoCD settings export?
-**Priority: Medium — open decision, not yet answered**
+**Priority: Medium — DECIDED: no**
 
-Two docs disagree: one says a daily `argocd admin export` is required, another argues Velero
-already covers it. Needs to be decided after Issue #11 (Velero) actually exists, so we can test
-what Velero really captures.
+Velero backs up the whole `argocd` namespace including Secrets, Applications and AppProjects, and
+Git holds the app definitions. A separate daily export is duplicate coverage for one more scheduled
+job. Removed from the design.
+
+The one thing to verify, during #11: that the Velero backup really does contain ArgoCD's Secrets
+and Applications. If it somehow doesn't, reopen this.
 
 **Answer / Output:**
 ```
@@ -339,15 +358,19 @@ run them on `k3-master` yet.
 
 ## Suggested order to work through this
 
-1. [#9](../../issues/9) — S3 + logins ready
-2. [#14](../../issues/14) — encryption on the bucket (do this at the same time as #9, not after)
-3. [#21](../../issues/21) — make sure the login can actually decrypt (fixes the multi-part upload bug)
-4. [#10](../../issues/10) — deploy the backup script
-5. [#17](../../issues/17) — deploy the version-manifest fix (already written, part of the same script)
-6. [#22](../../issues/22) — run the two read-only checks (node-exporter present? K3s Secret encryption on?)
-7. [#11](../../issues/11) — install Velero
-8. [#20](../../issues/20) — decide on ArgoCD export once Velero is in place
-9. [#1](../../issues/1) — ArgoCD/Git recoverability
-10. [#2](../../issues/2) — auto-cleanup + alerting
-11. [#12](../../issues/12) — test a real restore
-12. Everything else in [#3](../../issues/3) — the smaller gaps (#4, #5, #6, #8, #13, #15, #16, #19)
+1. [#4](../../issues/4) — **check the Traefik certificates first.** It's read-only, takes two
+   minutes, and it's the one answer that could change the design. If `acme.json` sits in an
+   `emptyDir`, nothing here backs it up and every restore comes back with broken HTTPS
+2. [#9](../../issues/9) + [#14](../../issues/14) — bucket, encryption key and both logins.
+   Encryption must be on **at creation**, not added afterwards
+3. [#21](../../issues/21) — prove the writer login can do a 64 MB multipart upload
+4. [#10](../../issues/10) + [#17](../../issues/17) — deploy job 1 and confirm `MANIFEST.json`
+   records a real K3s version
+5. [#11](../../issues/11) — **install Velero.** Until this exists, a deleted PVC is permanent
+6. [#22](../../issues/22) — the two read-only checks (node-exporter present? K3s secret encryption
+   on?)
+7. [#1](../../issues/1) — confirm every ArgoCD App is defined in Git ([#20](../../issues/20) is
+   already decided)
+8. [#2](../../issues/2) — retention rules + backup-arrived alerting
+9. [#12](../../issues/12) — **test both restore flows.** Nothing before this counts as proven
+10. Everything else in [#3](../../issues/3) — the smaller gaps (#8, #13, #15, #16, #19)

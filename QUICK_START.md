@@ -1,202 +1,191 @@
 # K3s Backup — Quick Start
 
-**Goal:** Back up K3s to AWS every day. If the server ever dies, restore from that backup.
+**Goal:** two backup jobs running daily to S3, and a restore we've actually tested.
 
-**Total time needed:** 1–2 weeks (most of it happens automatically, in the background)
+**Total time:** 1–2 weeks, most of it waiting for scheduled runs.
+
+| Day | Where | Time | What happens |
+|-----|-------|------|--------------|
+| 1 | k3-master | 30 min | Run the preflight checker (`--no-aws`) |
+| 2–3 | AWS account | 1–2 hrs | Bucket, KMS key, the two logins |
+| 4 | k3-master | 30 min | Install job 1, re-run preflight **with** AWS |
+| 5 | k3-master | 30 min | First real backup, then turn the timer on |
+| 6–7 | k3-master | 1 hr | Install job 2 (Velero) and verify it really reads the volumes |
+| 8+ | — | daily | Watch it, then test a restore |
 
 ---
 
-## DAY 1 — Just check things (run on k3-master)
+## DAY 1 — Just look (run on k3-master)
 
-**Time needed:** 30 minutes
-**Risk:** Zero — this only reads information, nothing gets changed
-**What to do:** Run these commands, and send me the output
-
-### Easiest way — run the preflight checker
-
-One command does almost all of Day 1 for you, and tells you exactly what's missing:
+**Risk: zero.** Read-only, changes nothing.
 
 ```bash
-# copy it across, then run it
 scp scripts/k3s-backup-preflight.sh root@45.90.98.51:/tmp/
 sudo install -m 0750 -o root -g root /tmp/k3s-backup-preflight.sh /usr/local/sbin/
 
-# AWS doesn't exist yet, so skip those checks for now
+# AWS doesn't exist yet, so skip those checks
 sudo /usr/local/sbin/k3s-backup-preflight.sh --no-aws
 ```
 
-It prints a PASS/WARN/FAIL line for every check, a table of what's running in each namespace, and
-— importantly — **a list of anything that's missing, with the exact command to fix it.**
+It prints PASS/WARN/FAIL for every check, an inventory of what's running, and **a list of anything
+missing with the exact command to fix it**. AWS failures on Day 1 are expected.
 
-You'll see failures about the AWS config not existing yet. That's expected on Day 1; we create
-that on Day 2–3.
-
-### The remaining manual checks
+Then the one check the preflight can't judge for you — **where our HTTPS certificates come from**.
+This is the single most important unknown in the whole project
+([#4](../../issues/4)):
 
 ```bash
-# The Traefik ingress setup (this one matters — the preflight can't judge it for you)
 sudo k3s kubectl get ingressroute -A
-
-sudo k3s kubectl -n kube-system get deploy traefik -o yaml | grep -i acme
+sudo k3s kubectl -n kube-system get deploy traefik -o yaml | grep -iA3 'acme\|certresolver'
 ```
 
-**Why we're doing this:** to confirm that:
-- The K3s version hasn't changed since we last checked
-- There's still enough free disk space
-- The certificate files are actually there
-- Nothing about the ingress setup is unusual or risky
+If Traefik keeps `acme.json` in an `emptyDir`, nothing in this plan backs it up and every restore
+comes back with broken HTTPS. Find out now, not during an outage.
 
-**→ Send me the output, and I'll give you the next step**
+**→ Send me the output and I'll give you the Day 2 commands.**
 
 ---
 
-## DAY 2–3 — Set up AWS (on your own laptop)
+## DAY 2–3 — Set up AWS (from your laptop)
 
-**Time needed:** 1–2 hours
-**Where:** Your AWS account (you'll need admin access)
-**What to do:** Create the S3 bucket, an encryption key, and a login for backups
-
-Once you send me the Day 1 output, I'll give you the exact commands to copy and paste. In short,
-here's what we're doing:
+Full commands are in [07 — Phase 0 & 1 Execution](docs/07-phase-0-1-execution.md). In short:
 
 ```
-1. Log into AWS
-2. Create an encryption key (KMS)
-3. Create the S3 bucket (k3-master-dr)
-4. Create a dedicated login (for backups only)
-5. Copy the login credentials (you'll paste these onto k3-master later)
+1. Create a KMS key
+2. Create the bucket k3-master-dr — encryption ON AT CREATION, versioning on, public access blocked
+3. Create the BACKUP WRITER login   (Put/Get/List; Delete only on velero/*; kms:GenerateDataKey + kms:Decrypt)
+4. Create the RESTORE READER login  (Get/List/kms:Decrypt) — store it offline, never on the server
+5. Add exactly two lifecycle rules: k3s/daily/ expire 8 days, k3s/weekly/ expire 31 days
 ```
 
-**Region:** `ap-south-1` (Mumbai) — this is our default, and it's easy to change later if needed
+**Region:** `ap-south-1` (Mumbai).
+
+> ⚠️ **No lifecycle rule on `velero/`.** Velero expires its own backups by TTL, and an S3 rule
+> would delete chunks that valid backups still depend on.
 
 ---
 
-## DAY 4 — Install the backup script (run on k3-master)
-
-**Time needed:** 30 minutes
-**Risk:** Very low — this only creates a new folder, nothing else changes
+## DAY 4 — Install job 1 (run on k3-master)
 
 ```bash
-# 1. Create the credentials file
-sudo nano /etc/k3s-backup/backup.env
-# Paste the AWS login details here
+# 1. credentials
+sudo mkdir -p /etc/k3s-backup && sudo chmod 0700 /etc/k3s-backup
+sudo nano /etc/k3s-backup/backup.env       # S3_BUCKET, AWS_REGION, KMS_KEY_ID (full ARN), keys
+sudo chmod 0600 /etc/k3s-backup/backup.env
 
-# 2. Copy the script onto the server (run this from your own laptop)
-scp scripts/k3s-track-a-backup.sh root@45.90.98.51:/usr/local/sbin/
-scp scripts/systemd/* root@45.90.98.51:/etc/systemd/system/
+# 2. from your laptop
+scp scripts/k3s-server-backup.sh root@45.90.98.51:/tmp/
+scp scripts/systemd/k3s-backup.* root@45.90.98.51:/etc/systemd/system/
 
-# 3. Re-run the preflight — now WITH the AWS checks, since the config exists
-#    This must come back READY before you go any further.
+# 3. on the server
+sudo install -m 0750 -o root -g root /tmp/k3s-server-backup.sh /usr/local/sbin/
+
+# 4. preflight WITH AWS — must come back READY before going further
 sudo /usr/local/sbin/k3s-backup-preflight.sh
 
-# 4. Do a test run (this builds the backup, but does NOT upload it anywhere)
-#    DRY_RUN=1 is what skips the upload — without it, this really uploads for real.
-sudo DRY_RUN=1 /usr/local/sbin/k3s-track-a-backup.sh full
-
-# 5. Check what it created
+# 5. dry run: builds everything, uploads nothing
+sudo DRY_RUN=1 /usr/local/sbin/k3s-server-backup.sh
 ls -la /var/backups/k3s/*/
 ```
 
-> **Step 3 is the important one.** It does a real 64 MB upload to check the AWS login can handle
-> a file the size of our actual database. A small test file wouldn't catch the most likely
-> permission problem — see [#21](../../issues/21). If the preflight says NOT READY, fix what it
-> lists before doing anything else.
+You should see exactly four artifacts plus their `.sha256` files:
 
----
-
-## DAY 5–7 — Do the first real backup (run on k3-master)
-
-**Time needed:** 30 minutes
-**What to do:** Actually upload a backup to AWS for real, for the first time
-
-```bash
-# Upload just the database first (small, so it's a quick test)
-sudo /usr/local/sbin/k3s-track-a-backup.sh db
-
-# Confirm it actually arrived in AWS
-sudo -E aws s3 ls s3://k3-master-dr/cluster-state/db/
-
-# Now upload everything
-sudo /usr/local/sbin/k3s-track-a-backup.sh full
-
-# Confirm every folder has something in it
-sudo -E aws s3 ls s3://k3-master-dr/ --recursive
+```text
+state.db   k3s-identity.tar.gz   node-config.tar.gz   MANIFEST.json
 ```
 
----
-
-## DAY 8 — Turn on the automatic schedule (run on k3-master)
-
-**Time needed:** 5 minutes
-**What to do:** Switch on the automatic timers so backups happen on their own from now on
+Check the manifest recorded the right version:
 
 ```bash
-# Install the scheduled jobs
+sudo python3 -m json.tool /var/backups/k3s/*/MANIFEST.json | grep k3s_version
+```
+
+> **Step 4 matters.** The preflight does a real 64 MB upload. A small test file passes even when
+> the login is missing `kms:Decrypt` — and then every real backup fails, because anything over
+> 8 MB goes up as a multipart upload ([#21](../../issues/21)).
+
+---
+
+## DAY 5 — First real backup, then turn it on
+
+```bash
+sudo /usr/local/sbin/k3s-server-backup.sh
+
+# confirm it arrived
+sudo -E aws s3 ls "s3://k3-master-dr/k3s/daily/" --recursive
+
+# turn on the daily schedule
 sudo systemctl daemon-reload
-sudo systemctl enable --now k3s-backup-db.timer
-sudo systemctl enable --now k3s-backup-full.timer
-
-# Confirm they're scheduled
+sudo systemctl enable --now k3s-backup.timer
 systemctl list-timers 'k3s-backup*'
-
-# From now on, this runs automatically:
-# - A database-only backup every 6 hours (at 00:20, 06:20, 12:20, 18:20 UTC)
-# - A full backup every day at 02:15 UTC
 ```
+
+From now on: **02:15 UTC every day**, and on Sundays it writes a second copy under `k3s/weekly/`.
 
 ---
 
-## WEEK 2+ — Just keep an eye on it (check daily)
+## DAY 6–7 — Install job 2 (Velero)
+
+Job 1 cannot restore a deleted PVC or a single deleted Secret. Velero is the only thing that can.
 
 ```bash
-# Check the logs
-journalctl -u 'k3s-backup@*' --since '24 hours ago' | tail -30
+export S3_BUCKET=k3-master-dr AWS_REGION=ap-south-1 KMS_KEY_ID=arn:aws:kms:...
+export CREDS_FILE=./velero-credentials
+./scripts/velero/install-velero.sh
 
-# Check disk space
-df -h /
-
-# Check how much data has built up in S3
-sudo -E aws s3 ls s3://k3-master-dr/ --recursive --human-readable | tail
+kubectl apply -f scripts/velero/schedule-daily.yaml
+kubectl apply -f scripts/velero/schedule-weekly.yaml
 ```
 
-**What you should see:** a new backup appearing every single day, without you doing anything.
+**Then verify it properly — a green checkmark is not evidence:**
+
+```bash
+velero backup create verify-$(date +%s) --wait
+velero backup describe <name> --details
+```
+
+All **six** monitoring PVCs must appear under *Pod Volume Backups*. If that section is empty, the
+node-agent isn't reading the volumes and you have a backup of nothing that reports success. See
+[02 §9 gap 2](docs/02-backup-strategy.md#9-gaps-that-still-need-validating).
+
+Finish by restoring one thing into a scratch namespace. That's the proof.
 
 ---
 
-## Summary
+## WEEK 2+ — Watch it
 
-| Day | Where | Time needed | What happens |
-|-----|----------|------|----------------|
-| 1 | k3-master | 30 min | Run the preflight checker (`--no-aws`) |
-| 2–3 | AWS account | 1–2 hrs | Create the bucket + keys |
-| 4 | k3-master | 30 min | Install the script, re-run preflight **with** AWS |
-| 5–7 | k3-master | 30 min | Do the first real backup |
-| 8 | k3-master | 5 min | Turn on the automatic schedule |
-| 9+ | k3-master | daily | Keep an eye on it |
+```bash
+journalctl -u k3s-backup.service --since '48 hours ago' | tail -30
+velero backup get
+sudo -E aws s3 ls s3://k3-master-dr/ --recursive --human-readable | tail
+df -h /
+```
+
+**What you should see:** a new folder under `k3s/daily/` and a new Velero backup every day, without
+anyone doing anything. Then set up the alerts (Phase 3) so you don't have to keep looking.
 
 ---
 
 ## What could go wrong
 
-| Problem | How to fix it |
+| Problem | Fix |
 |---------|-----|
 | Not sure what's missing | **Run the preflight** — it lists every problem with the exact fix command |
-| AWS login doesn't work | Day 2–3: double-check it in the AWS console |
-| Small uploads work, the database upload fails | Missing `kms:Decrypt` on the backup login — [#21](../../issues/21). The preflight catches this |
-| `AccessDenied` on *every* upload | `KMS_KEY_ID` is probably a bare key id instead of the full ARN — [#24](../../issues/24) |
-| Running low on disk space | Clean up old files under `/var/backups` |
-| Backup upload keeps failing | Check network connection and firewall rules |
-| The server dies | Restore from the AWS backup — see the [restore runbook](docs/03-restore-runbook.md) |
+| Small uploads work, the database upload fails | Missing `kms:Decrypt` on the backup login — [#21](../../issues/21) |
+| `AccessDenied` on *every* upload | `KMS_KEY_ID` is a bare key id instead of the full ARN — [#24](../../issues/24) |
+| Velero backups never expire | The login is missing `s3:DeleteObject` on `velero/*` — TTL expiry *is* Velero deleting its own objects |
+| `Pod Volume Backups` is empty | node-agent hostPath doesn't match K3s's kubelet root. **Fix this before trusting any backup** |
+| Running low on disk | Clean up `/var/backups/k3s` — the script already prunes anything older than 3 days |
+| The server dies | [Restore runbook §A](docs/03-restore-runbook.md#a--full-server-rebuild) |
+| Someone deleted a PVC or a Secret | [Restore runbook §B](docs/03-restore-runbook.md#b--restoring-one-pvc-or-one-object) — minutes, not hours |
 
 ---
 
 ## What to do next
 
-**Run the preflight checker on k3-master, and send me the output:**
-
 ```bash
 sudo /usr/local/sbin/k3s-backup-preflight.sh --no-aws
 ```
 
-That single output tells us what's already fine, what's missing, and what's running in every
-namespace. Once I see it, I'll give you the exact AWS commands to copy and paste (Day 2–3).
+Send me that output plus the two Traefik commands from Day 1, and I'll give you the exact AWS
+commands to paste.

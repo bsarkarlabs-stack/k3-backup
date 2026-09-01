@@ -136,7 +136,7 @@ Error: etcd datastore disabled
 
 **In plain words: the normal `k3s etcd-snapshot` backup command will not work on this server**,
 because we're using SQLite instead of etcd. We need a different backup method (see
-[Backup Strategy §3, Component 1](02-backup-strategy.md#component-1--k3s-datastore)).
+[Backup Strategy §3](02-backup-strategy.md#3-job-1--the-k3s-server-backup)).
 
 ### No external database either
 
@@ -146,9 +146,14 @@ Found none. K3s manages its own SQLite file, right there on this server.
 ### Why this matters: the database is "live"
 
 SQLite is actively writing to a "WAL" file (Write-Ahead Log — basically a scratchpad it uses
-before saving changes permanently). That means: **just copying `state.db` alone is NOT a safe
-backup.** The `-wal` and `-shm` files next to it are part of the same live data. All three files
-together are what actually needs to be backed up as one unit.
+before saving changes permanently). That means: **just copying `state.db` with `cp` is NOT a safe
+backup** — the `-wal` and `-shm` files next to it hold part of the live data, and a copy taken
+mid-write can capture a torn page.
+
+The fix is not to copy all three files. It's to use SQLite's **online backup API**, which reads a
+consistent view of the database and folds the WAL into a single output file. That's what
+[Job 1](02-backup-strategy.md#3-job-1--the-k3s-server-backup) does, and it's why a restore places
+only `state.db` and deletes any `-wal`/`-shm` left behind.
 
 ---
 
@@ -354,9 +359,9 @@ Restore ever tested      NEVER
 | `sqlite3` (command-line tool for SQLite) | ❌ No |
 
 The missing `sqlite3` tool matters: doing a safe backup of a live SQLite database requires using
-its proper "backup" feature — not just copying the file. We can do this using Python instead
-(which has the same feature built in), so we don't strictly need to install anything new. See
-[Backup Strategy §3, Component 1](02-backup-strategy.md#component-1--k3s-datastore) for details.
+its proper "backup" feature — not just copying the file. We do this using Python's built-in
+`sqlite3` module instead (same feature), so nothing new needs installing. See
+[Backup Strategy §3](02-backup-strategy.md#3-job-1--the-k3s-server-backup).
 
 ---
 
@@ -397,15 +402,17 @@ on-premise-style server with no automatic hosting-level snapshot feature availab
 | ArgoCD health and app list | ✅ Fully checked |
 | Existing scheduled backups | ✅ Checked — there are none |
 | Required tools installed | ✅ Fully checked |
-| **Who hosts this server** | ⚠️ Wasn't confirmed at first — later resolved (Datalix, on-premise style) |
+| **Who hosts this server** | ✅ Resolved — Datalix, on-premise style, no hosting-level snapshots |
+| **The server's network/firewall/login setup** | ✅ Captured automatically by Job 1 as `node-config.tar.gz` |
+| **List of installed system packages** | ✅ Same — `dpkg --get-selections` is in `node-config.tar.gz` |
 | **What's inside the `server/tls/` folder** | ⚠️ **Not checked file-by-file yet** |
 | **What's inside the `server/cred/` folder** | ⚠️ **Not checked file-by-file yet** |
-| **The server's network/firewall/login setup** | ⚠️ **Not written down yet** |
-| **Where our HTTPS certificate actually comes from** | ⚠️ **Not confirmed yet** |
-| **List of installed system packages** | ⚠️ **Not saved yet** |
+| **Where our HTTPS certificate actually comes from** | ⚠️ **Not confirmed yet — this is the blocking one** |
+| **Is K3s encrypting Secrets inside its own database?** | ⚠️ **Not checked yet** |
 
-The five ⚠️ items still open are tracked in
-[05 — Gaps & Open Questions](05-gaps-and-open-questions.md).
+The ⚠️ items are tracked in [05 — Gaps & Open Questions](05-gaps-and-open-questions.md). The whole
+of `tls/` and `cred/` is backed up either way — the open question is whether we've confirmed that
+by looking, not whether the backup covers it.
 
 ---
 

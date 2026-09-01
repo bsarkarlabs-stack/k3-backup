@@ -1,0 +1,27 @@
+# Job 2 of 2 — the weekly retention tier.
+#
+# Identical to schedule-daily.yaml except for the cron and the TTL. Kopia
+# deduplicates against the daily backups, so a weekly copy of ~8 GB of
+# monitoring data costs a fraction of that in new objects.
+#
+#   kubectl apply -f schedule-weekly.yaml
+#
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: weekly
+  namespace: velero
+spec:
+  # 04:00 Sunday — an hour after the daily run, so the two never overlap.
+  schedule: "0 4 * * 0"
+  useOwnerReferencesInBackup: false
+  template:
+    # 720h = 30 days -> 4 weekly restore points.
+    ttl: 720h0m0s
+    includeClusterResources: true
+    defaultVolumesToFsBackup: true
+    snapshotVolumes: false
+    storageLocation: default
+    metadata:
+      labels:
+        tier: weekly
