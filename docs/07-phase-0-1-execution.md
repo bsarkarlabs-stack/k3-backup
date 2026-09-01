@@ -847,6 +847,9 @@ we only ever tested with a tiny file, we'd get a green light here and then a con
 `AccessDenied` failure later at Stage F — during the first real backup.
 
 ```bash
+# if this is a new shell since D.3 started, load the config again first:
+set -a; . /etc/k3s-backup/backup.env; set +a
+
 # 64 MB of zeros, roughly the size of our real database backup
 dd if=/dev/zero of=/tmp/k3-egress-big.bin bs=1M count=64 status=none
 
@@ -875,6 +878,8 @@ rm -f /tmp/k3-egress-big.bin
 Now let's confirm our safety limits actually work — **both of the following must fail:**
 
 ```bash
+set -a; . /etc/k3s-backup/backup.env; set +a
+
 # should be blocked: this login cannot delete anything outside velero/
 sudo -E aws s3api delete-object --bucket "$S3_BUCKET" --key "_egress-test/k3-egress-test.txt"
 ```
