@@ -15,12 +15,19 @@
 
 ---
 
-## DAY 1 — Just look (run on k3-master)
+## DAY 1 — Just look
 
 **Risk: zero.** Read-only, changes nothing.
 
+From your laptop, in your clone of this repo:
+
 ```bash
-scp scripts/k3s-backup-preflight.sh root@45.90.98.51:/tmp/
+scp scripts/k3s-backup-preflight.sh <user>@45.90.98.51:/tmp/
+```
+
+Then on `k3-master`:
+
+```bash
 sudo install -m 0750 -o root -g root /tmp/k3s-backup-preflight.sh /usr/local/sbin/
 
 # AWS doesn't exist yet, so skip those checks
@@ -115,8 +122,11 @@ sudo python3 -m json.tool /var/backups/k3s/*/MANIFEST.json | grep k3s_version
 ```bash
 sudo /usr/local/sbin/k3s-server-backup.sh
 
-# confirm it arrived
-sudo -E aws s3 ls "s3://k3-master-dr/k3s/daily/" --recursive
+# confirm it arrived. The aws CLI needs the credentials from backup.env, so
+# load them into this shell first — otherwise you get "Unable to locate credentials".
+set -a; . /etc/k3s-backup/backup.env; set +a
+export AWS_DEFAULT_REGION="$AWS_REGION"
+sudo -E aws s3 ls "s3://$S3_BUCKET/k3s/daily/" --recursive
 
 # turn on the daily schedule
 sudo systemctl daemon-reload
@@ -158,8 +168,9 @@ shred -u ./velero-credentials    # it is now a Secret in the cluster; don't leav
 **Then verify it properly — a green checkmark is not evidence:**
 
 ```bash
-velero backup create verify-$(date +%s) --wait
-velero backup describe <name> --details
+NAME=verify-$(date +%s)
+velero backup create "$NAME" --wait
+velero backup describe "$NAME" --details
 ```
 
 All **six** monitoring PVCs must appear under *Pod Volume Backups*. If that section is empty, the
@@ -175,7 +186,11 @@ Finish by restoring one thing into a scratch namespace. That's the proof.
 ```bash
 journalctl -u k3s-backup.service --since '48 hours ago' | tail -30
 velero backup get
-sudo -E aws s3 ls s3://k3-master-dr/ --recursive --human-readable | tail
+
+set -a; . /etc/k3s-backup/backup.env; set +a
+export AWS_DEFAULT_REGION="$AWS_REGION"
+sudo -E aws s3 ls "s3://$S3_BUCKET/" --recursive --human-readable | tail
+
 df -h /
 ```
 

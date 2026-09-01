@@ -11,7 +11,7 @@ applies). Once an issue is answered, we mark it done and move to the next one.
 
 ## Build Phases — the main work, do these in order
 
-### 1. [#9](../../issues/9) — Phase 0: Get the basics ready
+### 1. [#9](../../../issues/9) — Phase 0: Get the basics ready
 **Priority: Do this first — everything else depends on it**
 
 What needs to happen:
@@ -29,7 +29,7 @@ What needs to happen:
 
 ---
 
-### 2. [#10](../../issues/10) — Phase 1: Job 1, the K3s server backup
+### 2. [#10](../../../issues/10) — Phase 1: Job 1, the K3s server backup
 **Priority: Highest**
 
 What needs to happen:
@@ -47,7 +47,7 @@ What needs to happen:
 
 ---
 
-### 3. [#11](../../issues/11) — Phase 2: Job 2, Velero
+### 3. [#11](../../../issues/11) — Phase 2: Job 2, Velero
 **Priority: Highest — currently not done at all. This is half the design.**
 
 What needs to happen:
@@ -68,7 +68,7 @@ What needs to happen:
 
 ---
 
-### 4. [#1](../../issues/1) / [#20](../../issues/20) — ArgoCD recoverability
+### 4. [#1](../../../issues/1) / [#20](../../../issues/20) — ArgoCD recoverability
 **Priority: Medium — decision made, one thing left to verify**
 
 **Decided: no separate daily `argocd admin export`.** Velero backs up the whole `argocd` namespace
@@ -88,7 +88,7 @@ What's left:
 
 ---
 
-### 5. [#2](../../issues/2) — Phase 3: Retention + alerting
+### 5. [#2](../../../issues/2) — Phase 3: Retention + alerting
 **Priority: Medium**
 
 What needs to happen:
@@ -108,7 +108,7 @@ What needs to happen:
 
 ---
 
-### 6. [#12](../../issues/12) — Phase 4: Prove a restore works
+### 6. [#12](../../../issues/12) — Phase 4: Prove a restore works
 **Priority: Medium — turns "hope" into "proof"**
 
 What needs to happen:
@@ -127,7 +127,7 @@ What needs to happen:
 
 ---
 
-### 7. [#3](../../issues/3) — Phase 5: Close remaining unknowns
+### 7. [#3](../../../issues/3) — Phase 5: Close remaining unknowns
 **Priority: Low — doesn't block earlier phases**
 
 What needs to happen:
@@ -142,7 +142,7 @@ What needs to happen:
 
 ## Known Gaps — smaller unknowns
 
-### 8. [#14](../../issues/14) — Bucket must be encrypted
+### 8. [#14](../../../issues/14) — Bucket must be encrypted
 **Priority: Highest / Critical**
 
 Secrets reach S3 in plain text unless SSE-KMS encryption is turned on **from the bucket's
@@ -155,7 +155,7 @@ creation**, not added later.
 
 ---
 
-### 9. [#4](../../issues/4) — Where do HTTPS certificates actually come from?
+### 9. [#4](../../../issues/4) — Where do HTTPS certificates actually come from?
 **Priority: Medium / High**
 
 Need to check if Traefik's certificates are Kubernetes Secrets, or issued automatically via
@@ -168,7 +168,7 @@ Need to check if Traefik's certificates are Kubernetes Secrets, or issued automa
 
 ---
 
-### 10. [#5](../../issues/5) / [#6](../../issues/6) — Server OS-level settings not backed up
+### 10. [#5](../../../issues/5) / [#6](../../../issues/6) — Server OS-level settings not backed up
 **Priority: Medium — resolved in the design, needs one confirming run**
 
 Network settings, firewall rules, SSH keys, timezone and the installed-package list are now
@@ -182,7 +182,7 @@ no separate prefix. Confirm the file appears in the first real backup and contai
 
 ---
 
-### 11. [#8](../../issues/8) — `tls/` and `cred/` folders never checked file-by-file
+### 11. [#8](../../../issues/8) — `tls/` and `cred/` folders never checked file-by-file
 **Priority: Medium / High**
 
 Need to list (names + permissions only, never contents) what's actually inside these two
@@ -195,7 +195,7 @@ folders, and confirm the backup script covers everything.
 
 ---
 
-### 12. [#13](../../issues/13) — Who hosts this server?
+### 12. [#13](../../../issues/13) — Who hosts this server?
 **Priority: Low — mostly resolved**
 
 Already answered: Datalix, treated as on-premise, no snapshot fallback available.
@@ -207,7 +207,7 @@ Already answered: Datalix, treated as on-premise, no snapshot fallback available
 
 ---
 
-### 13. [#6](../../issues/6) — Installed system software list not saved
+### 13. [#6](../../../issues/6) — Installed system software list not saved
 **Priority: Low**
 
 Add `dpkg --get-selections` output to the node-config backup.
@@ -219,7 +219,7 @@ Add `dpkg --get-selections` output to the node-config backup.
 
 ---
 
-### 14. [#15](../../issues/15) — Single AWS region, no backup-of-the-backup
+### 14. [#15](../../../issues/15) — Single AWS region, no backup-of-the-backup
 **Priority: Low**
 
 Decide explicitly: is one region acceptable, or do we need cross-region copies too?
@@ -231,7 +231,7 @@ Decide explicitly: is one region acceptable, or do we need cross-region copies t
 
 ---
 
-### 15. [#7](../../issues/7) — Documentation must not live only on the server
+### 15. [#7](../../../issues/7) — Documentation must not live only on the server
 **Priority: Low — already resolved**
 
 Already fixed: this GitHub repo is the one true copy.
@@ -243,7 +243,7 @@ Already fixed: this GitHub repo is the one true copy.
 
 ---
 
-### 16. [#16](../../issues/16) — No owner for credential rotation
+### 16. [#16](../../../issues/16) — No owner for credential rotation
 **Priority: Low**
 
 Assign one specific person + a schedule (suggested: every 90 days) to rotate the backup
@@ -258,7 +258,7 @@ login credentials.
 
 ## Found during a K3s review — newer issues
 
-### 17. [#17](../../issues/17) — Backups never recorded which K3s version made them
+### 17. [#17](../../../issues/17) — Backups never recorded which K3s version made them
 **Priority: Highest — fixed in code, not yet deployed**
 
 Fixed by writing a `MANIFEST.json` into every backup run's folder, recording the K3s version, the
@@ -273,7 +273,7 @@ working.
 
 ---
 
-### 18. [#18](../../issues/18) — Restore runbook assumed tools that don't exist yet
+### 18. [#18](../../../issues/18) — Restore runbook assumed tools that don't exist yet
 **Priority: Medium — fixed**
 
 Fixed by adding a "what this runbook can actually do today" table and marking restore steps 8
@@ -286,7 +286,7 @@ and 9 (Velero restore, ArgoCD import) as blocked until Issue #11 is done.
 
 ---
 
-### 19. [#19](../../issues/19) — Nobody wrote down how K3s certificates expire
+### 19. [#19](../../../issues/19) — Nobody wrote down how K3s certificates expire
 **Priority: Medium — fixed**
 
 Fixed by adding a "normal vs. real problem" table for certificate errors during restore, and a
@@ -300,7 +300,7 @@ expiry dates from `k3-master` (Stage B.1 in doc 07) — nobody has run that chec
 
 ---
 
-### 20. [#20](../../issues/20) — Do we actually need the ArgoCD settings export?
+### 20. [#20](../../../issues/20) — Do we actually need the ArgoCD settings export?
 **Priority: Medium — DECIDED: no**
 
 Velero backs up the whole `argocd` namespace including Secrets, Applications and AppProjects, and
@@ -317,7 +317,7 @@ and Applications. If it somehow doesn't, reopen this.
 
 ---
 
-### 21. [#21](../../issues/21) — Backup login couldn't actually upload our database file
+### 21. [#21](../../../issues/21) — Backup login couldn't actually upload our database file
 **Priority: Critical — fixed**
 
 The server's backup login was given no `kms:Decrypt` permission (reasoning: it only ever writes,
@@ -336,7 +336,7 @@ upload a 64 MB file instead of a tiny one.
 
 ---
 
-### 22. [#22](../../issues/22) — Two things that can only be checked on the server
+### 22. [#22](../../../issues/22) — Two things that can only be checked on the server
 **Priority: High / Medium — read-only checks, waiting on someone running them**
 
 Two separate questions bundled under one issue:
@@ -361,19 +361,19 @@ run them on `k3-master` yet.
 
 ## Suggested order to work through this
 
-1. [#4](../../issues/4) — **check the Traefik certificates first.** It's read-only, takes two
+1. [#4](../../../issues/4) — **check the Traefik certificates first.** It's read-only, takes two
    minutes, and it's the one answer that could change the design. If `acme.json` sits in an
    `emptyDir`, nothing here backs it up and every restore comes back with broken HTTPS
-2. [#9](../../issues/9) + [#14](../../issues/14) — bucket, encryption key and both logins.
+2. [#9](../../../issues/9) + [#14](../../../issues/14) — bucket, encryption key and both logins.
    Encryption must be on **at creation**, not added afterwards
-3. [#21](../../issues/21) — prove the writer login can do a 64 MB multipart upload
-4. [#10](../../issues/10) + [#17](../../issues/17) — deploy job 1 and confirm `MANIFEST.json`
+3. [#21](../../../issues/21) — prove the writer login can do a 64 MB multipart upload
+4. [#10](../../../issues/10) + [#17](../../../issues/17) — deploy job 1 and confirm `MANIFEST.json`
    records a real K3s version
-5. [#11](../../issues/11) — **install Velero.** Until this exists, a deleted PVC is permanent
-6. [#22](../../issues/22) — the two read-only checks (node-exporter present? K3s secret encryption
+5. [#11](../../../issues/11) — **install Velero.** Until this exists, a deleted PVC is permanent
+6. [#22](../../../issues/22) — the two read-only checks (node-exporter present? K3s secret encryption
    on?)
-7. [#1](../../issues/1) — confirm every ArgoCD App is defined in Git ([#20](../../issues/20) is
+7. [#1](../../../issues/1) — confirm every ArgoCD App is defined in Git ([#20](../../../issues/20) is
    already decided)
-8. [#2](../../issues/2) — retention rules + backup-arrived alerting
-9. [#12](../../issues/12) — **test both restore flows.** Nothing before this counts as proven
-10. Everything else in [#3](../../issues/3) — the smaller gaps (#8, #13, #15, #16, #19)
+8. [#2](../../../issues/2) — retention rules + backup-arrived alerting
+9. [#12](../../../issues/12) — **test both restore flows.** Nothing before this counts as proven
+10. Everything else in [#3](../../../issues/3) — the smaller gaps (#8, #13, #15, #16, #19)

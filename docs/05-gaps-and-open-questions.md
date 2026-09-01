@@ -7,14 +7,14 @@ could still make that design wrong on this particular server.
 
 | # | Gap | Serious? | Blocks | Issue |
 |---|-----|----------|--------|-------|
-| 1 | Where Traefik's HTTPS certificates actually come from | **Blocking** | A clean restore — silently | [#4](../../issues/4) |
-| 2 | Whether Velero's node-agent can actually read our volumes | **Blocking** | All PVC and single-object restores | [#11](../../issues/11) |
-| 3 | Nothing has ever been restored | **Blocking** | Knowing any of this works | [#12](../../issues/12) |
-| 4 | Crash-consistency of the Prometheus / Loki / MinIO volumes | High | Trusting a PVC restore | [#12](../../issues/12) |
-| 5 | Is K3s encrypting Secrets inside its own database? | Medium | How loudly we flag `cred/` in the runbook | [#22](../../issues/22) |
-| 6 | Does our "backup succeeded" signal go anywhere? | Medium | Alerting being real rather than decorative | [#22](../../issues/22) |
-| 7 | Nobody owns rotating the S3 credentials | Medium | Long-term security posture | [#16](../../issues/16) |
-| 8 | One region, one bucket, no backup-of-the-backup | Low | A whole-region outage | [#15](../../issues/15) |
+| 1 | Where Traefik's HTTPS certificates actually come from | **Blocking** | A clean restore — silently | [#4](../../../issues/4) |
+| 2 | Whether Velero's node-agent can actually read our volumes | **Blocking** | All PVC and single-object restores | [#11](../../../issues/11) |
+| 3 | Nothing has ever been restored | **Blocking** | Knowing any of this works | [#12](../../../issues/12) |
+| 4 | Crash-consistency of the Prometheus / Loki / MinIO volumes | High | Trusting a PVC restore | [#12](../../../issues/12) |
+| 5 | Is K3s encrypting Secrets inside its own database? | Medium | How loudly we flag `cred/` in the runbook | [#22](../../../issues/22) |
+| 6 | Does our "backup succeeded" signal go anywhere? | Medium | Alerting being real rather than decorative | [#22](../../../issues/22) |
+| 7 | Nobody owns rotating the S3 credentials | Medium | Long-term security posture | [#16](../../../issues/16) |
+| 8 | One region, one bucket, no backup-of-the-backup | Low | A whole-region outage | [#15](../../../issues/15) |
 
 ---
 
@@ -140,16 +140,16 @@ reasoning isn't lost.
 
 | Was | Now |
 |-----|-----|
-| **Host OS settings weren't backed up** (network, firewall, SSH, packages) — restore step 2 was reconstruction from memory | Captured by Job 1 as `node-config.tar.gz`, in the same folder as everything else. Closes old gaps 3 and 4 ([#5](../../issues/5), [#6](../../issues/6)) |
-| **Backups didn't record which K3s version made them** | `MANIFEST.json` in every run folder ([#17](../../issues/17)) |
-| **Nothing said which files belonged to the same backup run** — 4 datastore runs a day across 7 prefixes | One run a day, one folder, one complete set. The problem is gone rather than solved ([#23](../../issues/23)) |
-| **The runbook told you to use tools that didn't exist** | Both flows now name exactly what must be installed first, and Phase 2 is the blocker ([#18](../../issues/18)) |
-| **Nobody had written down how K3s certificates expire** | The "normal kind vs. real problem" table in [restore step 6](03-restore-runbook.md#step-6--start-k3s-and-verify-the-control-plane) ([#19](../../issues/19)) |
-| **The backup login couldn't upload a 64 MB file** — no `kms:Decrypt`, and the test used a 50-byte file that passed | `kms:Decrypt` scoped to our one key, and the preflight uploads 64 MB ([#21](../../issues/21)) |
-| **A bare KMS key id would deny every upload** | The script rejects anything that isn't a full ARN, with a readable message ([#24](../../issues/24)) |
-| **Do we need a daily ArgoCD export?** Two documents disagreed | **Decided: no.** Velero backs up the `argocd` namespace including Secrets, Applications and AppProjects; Git holds the app definitions. Verify once in Phase 2, then it's settled ([#20](../../issues/20), [#1](../../issues/1)) |
-| **Who hosts this server** | Datalix, treated as on-premise. No hosting-level snapshot available ([#13](../../issues/13)) |
-| **This documentation could live only on the server** | This repo is the one true copy ([#7](../../issues/7)) |
+| **Host OS settings weren't backed up** (network, firewall, SSH, packages) — restore step 2 was reconstruction from memory | Captured by Job 1 as `node-config.tar.gz`, in the same folder as everything else. Closes old gaps 3 and 4 ([#5](../../../issues/5), [#6](../../../issues/6)) |
+| **Backups didn't record which K3s version made them** | `MANIFEST.json` in every run folder ([#17](../../../issues/17)) |
+| **Nothing said which files belonged to the same backup run** — 4 datastore runs a day across 7 prefixes | One run a day, one folder, one complete set. The problem is gone rather than solved ([#23](../../../issues/23)) |
+| **The runbook told you to use tools that didn't exist** | Both flows now name exactly what must be installed first, and Phase 2 is the blocker ([#18](../../../issues/18)) |
+| **Nobody had written down how K3s certificates expire** | The "normal kind vs. real problem" table in [restore step 6](03-restore-runbook.md#step-6--start-k3s-and-verify-the-control-plane) ([#19](../../../issues/19)) |
+| **The backup login couldn't upload a 64 MB file** — no `kms:Decrypt`, and the test used a 50-byte file that passed | `kms:Decrypt` scoped to our one key, and the preflight uploads 64 MB ([#21](../../../issues/21)) |
+| **A bare KMS key id would deny every upload** | The script rejects anything that isn't a full ARN, with a readable message ([#24](../../../issues/24)) |
+| **Do we need a daily ArgoCD export?** Two documents disagreed | **Decided: no.** Velero backs up the `argocd` namespace including Secrets, Applications and AppProjects; Git holds the app definitions. Verify once in Phase 2, then it's settled ([#20](../../../issues/20), [#1](../../../issues/1)) |
+| **Who hosts this server** | Datalix, treated as on-premise. No hosting-level snapshot available ([#13](../../../issues/13)) |
+| **This documentation could live only on the server** | This repo is the one true copy ([#7](../../../issues/7)) |
 
 ---
 

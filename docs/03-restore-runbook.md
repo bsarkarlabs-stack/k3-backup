@@ -7,7 +7,7 @@ Two flows, and you almost always want the second one.
 | **Full server rebuild** | The server is gone, corrupted, or moving to a new machine | ~2 hours (estimated — never timed for real) | [§A](#a--full-server-rebuild) |
 | **One PVC or one object** | Someone deleted the wrong thing, or one volume's data is bad | ~10 minutes | [§B](#b--restoring-one-pvc-or-one-object) |
 
-> ⚠️ **Neither flow has been run end to end yet.** Until [#12](../../issues/12) is done, treat every
+> ⚠️ **Neither flow has been run end to end yet.** Until [#12](../../../issues/12) is done, treat every
 > step as unproven and every duration as a guess. See
 > [02 §9](02-backup-strategy.md#9-gaps-that-still-need-validating).
 
@@ -129,7 +129,7 @@ ls /var/lib/rancher/k3s/server/cred/                     # if encryption-config.
 
 If `k3s secrets-encrypt` was enabled on the old server, `cred/encryption-config.json` is
 **mandatory** — without it every Secret in the restored database is unreadable ciphertext
-([#22](../../issues/22)).
+([#22](../../../issues/22)).
 
 ### Step 5 — Only if the new host has a different IP
 
