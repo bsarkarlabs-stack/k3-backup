@@ -25,8 +25,16 @@ kubeconfig
 k3s.yaml
 .aws/
 credentials
+*.credentials
+velero-credentials
+backup.env
 *.token
 token
+
+# Environment / local overrides — may hold real keys during setup
+.env
+.env.*
+*.local
 
 # Backup artefacts — these belong in S3, not in git
 *.tar

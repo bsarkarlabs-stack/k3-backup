@@ -15,8 +15,15 @@ Five stages, in order:
 | [4](#stage-4--deploy-job-2-velero) | Deploy Job 2: Velero, and prove it reads the volumes | 4.1–4.6 | `[local]` | Low — installs into the cluster |
 | [5](#stage-5--monitoring-and-the-restore-test) | Wire and test the four alerts, then prove a restore works | 5.1–5.7 | both | **None** |
 
-`[local]` means your own laptop with your AWS admin login. `[node]` means an SSH session on
-`k3-master`.
+**Every step is tagged with where you run it.** Get this wrong and commands fail in confusing ways,
+or a credential lands on the wrong machine.
+
+- **`[local]`** — your own laptop, in a terminal with your AWS admin login. On Windows use Git Bash
+  or WSL so the `bash` snippets work. Nothing here is typed on the server.
+- **`[node]`** — an SSH session on `k3-master` (`ssh <user>@45.90.98.51`), as a user who can `sudo`.
+- **`[decision]`** — no command; a thing to agree and write down.
+
+If a snippet is tagged `[local]` do **not** paste it into the server session, and vice versa.
 
 ### Every step, in order
 
@@ -71,15 +78,37 @@ backup uses SQLite's built-in online backup API through a read-only connection, 
 is in WAL mode this never blocks anything else writing to the database.** A plain file copy would
 have been the dangerous option — that's exactly why the script doesn't do one.
 
-These shell variables are used throughout the `[local]` steps:
+These shell variables are used throughout the `[local]` steps. Set them **on your laptop**, in the
+terminal you'll run the AWS commands from. They are just shell variables — no file is created, and
+they vanish when you close the terminal, so re-export them if you open a new one.
+
+First, confirm the AWS CLI is installed and logged in `[local]`:
 
 ```bash
-export AWS_PROFILE=<your-admin-profile>
-export REGION=ap-south-1                  # Mumbai. Any region works — see stage 2.1
-export BUCKET=k3-master-dr                # globally unique; add a suffix if taken
+aws --version                    # v2.x
+aws sts get-caller-identity      # shows your account — if this errors, log in first
+```
+
+If you juggle several AWS accounts, create and select a dedicated profile so you don't act on the
+wrong one:
+
+```bash
+aws configure --profile k3-backup-admin     # one-time, enter the admin key/secret/region
+export AWS_PROFILE=k3-backup-admin
+```
+
+Then set the variables every later `[local]` step relies on:
+
+```bash
+export AWS_PROFILE=k3-backup-admin        # the profile you just selected
+export REGION=ap-south-1                   # Mumbai. Any region works — see stage 2.1
+export BUCKET=k3-master-dr                 # globally unique; add a suffix if taken
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 echo "$REGION / $BUCKET / $ACCOUNT_ID"
 ```
+
+For the full picture of which credential and file belongs on which machine, read
+[Where each credential and config lives](#where-each-credential-and-config-lives) before Stage 2.
 
 ---
 
@@ -245,9 +274,70 @@ perfectly good answer — an unexamined default is not.
 
 ---
 
+## Where each credential and config lives
+
+Before creating anything in AWS, hold this map in your head. The single most common beginner mistake
+here is putting a credential in the wrong place — the Velero key in `backup.env`, or a real key in
+Git. There are **four** places things live, and each one holds different things.
+
+```text
+                         AWS ACCOUNT
+                              |
+              +---------------+----------------+
+              |                                |
+          S3 bucket                          IAM
+        k3-master-dr-xxxx        +------------+------------+
+                                 |                         |
+                       k3-master-backup-writer     k3-master-velero
+                          (Job 1 key)                 (Velero key)
+                                 |                         |
+                                 v                         v
+                        /etc/k3s-backup/backup.env   Kubernetes Secret
+                        on k3-master                 in the velero namespace
+```
+
+| Where | What lives there | Permanent? |
+|-------|------------------|------------|
+| **Laptop `[local]`** | Your AWS admin profile; temporary `/tmp/k3-dr-*.json` policy files; a temporary `./velero-credentials` file | **No** — the `/tmp` files and `velero-credentials` are deleted once used |
+| **AWS** | The S3 bucket; IAM users `k3-master-backup-writer` and `k3-master-velero`; their inline policies and access keys | Yes |
+| **`k3-master` `[node]`** | `/etc/k3s-backup/backup.env` — holds **only** the Job 1 key | Yes |
+| **Kubernetes** | The Velero AWS key, stored as a Secret in the `velero` namespace (the installer creates it) | Yes |
+| **This Git repo** | Scripts, docs, systemd units, Velero YAML — **never a real key** | Yes |
+
+Two rules that fall out of the map:
+
+- **The Velero key never goes in `backup.env`.** `backup.env` is Job 1 only. The Velero key reaches
+  the cluster through the installer, as a Kubernetes Secret, and its laptop copy is shredded after.
+- **No real key ever gets committed.** `.gitignore` already blocks `backup.env`, `*.credentials`,
+  `velero-credentials`, `*.key` and `.env*`; the two access-key secrets are shown once by AWS, so
+  save them in a password manager, not in a file in this repo.
+
+The temporary laptop files you will create and then delete:
+
+```text
+/tmp/k3-dr-bucket-policy.json     bucket HTTPS-only policy   (step 2.3)
+/tmp/k3-dr-lifecycle.json         retention rules            (step 2.4)
+/tmp/k3-dr-writer-policy.json     Job 1 IAM policy           (step 2.5)
+/tmp/k3-dr-velero-policy.json     Velero IAM policy          (step 2.5)
+./velero-credentials              Velero key, for the installer only (step 4.2)
+```
+
+Each of these is only a *helper* that hands a document to AWS or the installer. The real
+configuration ends up inside AWS, on the node, or in the cluster — never in these files, which is
+why every one of them is deleted once it has done its job.
+
+---
+
 ## Stage 2 — Create the bucket and two scoped workload credentials
 
-All `[local]`, with your admin login. **Nothing here touches `k3-master`.**
+All `[local]`, with your admin login. **Nothing here touches `k3-master`.** If you have more than
+one AWS account configured, confirm you are pointed at the right one before creating anything:
+
+```bash
+aws sts get-caller-identity      # is this the account that should own the DR bucket?
+```
+
+If it isn't, set `AWS_PROFILE` (see the variable block above) until this shows the correct account.
 
 ### 2.1 — Pick a region
 
@@ -509,6 +599,13 @@ current-version expiry on `velero/` or `k3s-release/`, and one inline policy on 
 **This is the only place bucket settings get verified.** The on-node preflight deliberately doesn't
 check them — that credential can't read bucket configuration, and it shouldn't be able to.
 
+Once the checks above pass, delete the leftover policy helper files — they've done their job and hold
+nothing you need again (the real policies now live in AWS):
+
+```bash
+rm -f /tmp/k3-dr-bucket-policy.json /tmp/k3-dr-writer-policy.json /tmp/k3-dr-velero-policy.json
+```
+
 ### 2.7 — Write down who can restore `[local]`
 
 Five minutes of writing, and it's what makes the "no stored restore key" decision safe rather than
@@ -540,7 +637,14 @@ what you just wrote, without asking you anything.
 
 ## Stage 3 — Deploy Job 1
 
+From here on you are on the server. `ssh <user>@45.90.98.51` and stay there through the end of
+Stage 3.
+
 ### 3.1 — Write the config `[node]`
+
+This is the one place the **Job 1** access key from 2.5 gets stored. Use the
+`k3-master-backup-writer` pair — **not** the Velero pair, which never touches this file (it goes
+into the cluster in 4.2).
 
 ```bash
 sudo install -d -m 0700 -o root -g root /etc/k3s-backup
@@ -551,8 +655,8 @@ sudo nano /etc/k3s-backup/backup.env
 ```ini
 S3_BUCKET=k3-master-dr
 AWS_REGION=<your-region>
-AWS_ACCESS_KEY_ID=<from stage 2.5>
-AWS_SECRET_ACCESS_KEY=<from stage 2.5>
+AWS_ACCESS_KEY_ID=<k3-master-backup-writer key from 2.5>
+AWS_SECRET_ACCESS_KEY=<k3-master-backup-writer secret from 2.5>
 # Job 1's external dead-man signal. Velero uses a separate URL. See 02 §7.
 HEARTBEAT_URL=
 ```
@@ -821,11 +925,16 @@ kubectl get nodes                  # k3-master Ready
 
 The installer pins AWS plugin `v1.14.1`, the compatible plugin series for Velero `v1.18.x`.
 
+Now the **Velero** access key from 2.5 comes into play — the `k3-master-velero` pair, which is
+different from the Job 1 key in `backup.env`. It goes into a short-lived file on your laptop that
+the installer turns into a Kubernetes Secret; you shred the file straight after. It is never written
+to `backup.env` and never committed.
+
 ```bash
 cat > ./velero-credentials <<'EOF'
 [default]
-aws_access_key_id=<the dedicated Velero key from 2.5>
-aws_secret_access_key=<the dedicated Velero secret>
+aws_access_key_id=<k3-master-velero key from 2.5>
+aws_secret_access_key=<k3-master-velero secret from 2.5>
 EOF
 chmod 600 ./velero-credentials
 
@@ -833,12 +942,19 @@ export S3_BUCKET="$BUCKET" AWS_REGION="$REGION" CREDS_FILE=./velero-credentials
 export KUBELET_ROOT_DIR=/var/lib/kubelet   # replace with the verified 4.1 value
 ./scripts/velero/install-velero.sh
 
-shred -u ./velero-credentials
+shred -u ./velero-credentials             # the key now lives only as a cluster Secret
 kubectl apply -f scripts/velero/schedule-daily.yaml
 kubectl apply -f scripts/velero/schedule-weekly.yaml
 ```
 
-No encryption flags are passed — the bucket's default SSE-S3 encrypts every object on arrival.
+No encryption flags are passed — the bucket's default SSE-S3 encrypts every object on arrival. After
+the install, the Velero key lives **only** as a Secret in the `velero` namespace; confirm it landed
+and nothing kept a plaintext copy:
+
+```bash
+kubectl -n velero get secret cloud-credentials     # created by the installer
+ls ./velero-credentials 2>/dev/null && echo "DELETE THIS" || echo "good — laptop copy is gone"
+```
 
 **Check, and write these three versions down** — a restore has to reproduce them, and `velero
 install` deploys `velero/velero:<CLI version>`, so an unpinned CLI silently decides the server
