@@ -7,7 +7,7 @@ Four flows. You almost always want the second one.
 | **Full server rebuild** | The server is gone, corrupted, or moving to a new machine | ~2 hours (estimated — never timed for real) | [§A](#a--full-server-rebuild) |
 | **One PVC or one object** | Someone deleted the wrong thing, or one volume's data is bad | ~10 minutes | [§B](#b--restoring-one-pvc-or-one-object) |
 | **The restore test** | On a schedule, on a throwaway VM, so the others are known to work | ~2–3 hours | [§C](#c--the-restore-test) |
-| **Rebuild from Velero alone** | The datastore itself is the problem, or you're changing K3s version | ~1 hour | [§D](#d--rebuilding-from-velero-alone-into-a-fresh-cluster) |
+| **Rebuild from Velero alone** | Every usable datastore backup is suspect, so cluster identity has to be given up | ~1 hour | [§D](#d--rebuilding-from-velero-alone-into-a-fresh-cluster) |
 
 > ### The one rule that governs every flow here
 >
@@ -25,10 +25,13 @@ Four flows. You almost always want the second one.
 
 | You need | Details |
 |----------|---------|
-| An AWS login that can read the bucket | Your normal admin or SSO login. There is deliberately no separate stored restore key — [02 §3](02-backup-strategy.md#one-credential-and-what-it-deliberately-cannot-do) |
+| An AWS login that can read the bucket | Your normal admin or SSO login. There is deliberately no separate stored restore key — [02 §3](02-backup-strategy.md#two-workload-credentials-separated-by-failure-domain) |
 | The bucket name and region | `k3-master-dr`, `ap-south-1` — written down outside AWS as well |
 | A replacement server | 8 cores, 22 GB RAM, ≥97 GB disk, x86_64, Ubuntu 24.04 LTS |
 | The K3s version | **Don't guess — read it out of `MANIFEST.json`.** It was `v1.34.5+k3s1` when this was written |
+| This repository | Clone it before the outage procedure needs `scripts/velero/` or copy the pinned scripts into the recovery kit |
+| Recovery tools | AWS CLI v2, `python3`, `tar`, `sha256sum`, `kubectl`, the Velero CLI version pinned by `install-velero.sh`, and a working kubeconfig |
+| ArgoCD access | `argocd` CLI plus admin access, or use the documented `kubectl` checks instead |
 
 ### Things that were already broken before any of this started
 
@@ -41,20 +44,32 @@ Don't mistake these for restore failures: `demo-app` (not synced), `nginx-app` (
 
 ### Step 1 — Pick a backup and read its manifest
 
-Each day's folder holds three objects and is one complete, self-contained restore set.
+Each successful run has a unique UTC prefix. `COMPLETE.json` is uploaded last; ignore every prefix
+without it, because it may be a partial upload.
 
 ```bash
 export BUCKET=k3-master-dr AWS_DEFAULT_REGION=ap-south-1
 
-# what's available: 7 daily, 4 weekly
-aws s3 ls "s3://$BUCKET/k3s/daily/"
-aws s3 ls "s3://$BUCKET/k3s/weekly/"
+# List only committed restore sets and choose the newest one.
+aws s3api list-objects-v2 --bucket "$BUCKET" --prefix k3s/daily/ \
+  --query "Contents[?ends_with(Key, 'COMPLETE.json')].Key" --output text
 
-DATE=$(aws s3 ls "s3://$BUCKET/k3s/daily/" | awk '{print $2}' | tr -d '/' | sort | tail -1)
+RUN_ID=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix k3s/daily/ \
+  --query "Contents[?ends_with(Key, 'COMPLETE.json')].Key" --output text |
+  tr '\t' '\n' | awk -F/ '{print $3}' | sort | tail -1)
+[ -n "$RUN_ID" ] || { echo "no complete daily restore set found" >&2; exit 1; }
+PREFIX="k3s/daily/$RUN_ID"
 mkdir -p ~/k3-restore && cd ~/k3-restore
 
 # read the manifest first — it's 2 KB, and it tells you what to install
-aws s3 cp "s3://$BUCKET/k3s/daily/$DATE/MANIFEST.json" .
+aws s3 cp "s3://$BUCKET/$PREFIX/COMPLETE.json" .
+aws s3 cp "s3://$BUCKET/$PREFIX/MANIFEST.json" .
+python3 - <<'PY'
+import hashlib, json
+expected = json.load(open("COMPLETE.json"))["manifest_sha256"]
+actual = hashlib.sha256(open("MANIFEST.json", "rb").read()).hexdigest()
+assert actual == expected, f"manifest checksum mismatch: {actual} != {expected}"
+PY
 python3 -m json.tool MANIFEST.json
 ```
 
@@ -67,18 +82,34 @@ Read out of it:
 - **`os_release`** and **`arch`** — what the replacement host has to be.
 - **`archive.sha256`** — verify against this after downloading.
 
-Then take the archive:
+Then take the archive and verify it **through the manifest**, not through the sidecar `.sha256`
+file. The sidecar is a convenience copy that nothing else vouches for; `MANIFEST.json` is the copy
+whose own checksum you just confirmed against `COMPLETE.json`. Verifying against the manifest keeps
+one unbroken chain: last-written marker → manifest → archive.
 
 ```bash
-aws s3 cp "s3://$BUCKET/k3s/daily/$DATE/" . --recursive
-sha256sum -c ./*.sha256
+aws s3 cp "s3://$BUCKET/$PREFIX/" . --recursive
+
+python3 - <<'PY'
+import hashlib, json
+m = json.load(open("MANIFEST.json"))["archive"]
+digest = hashlib.sha256()
+with open(m["filename"], "rb") as fh:
+    for chunk in iter(lambda: fh.read(1 << 20), b""):
+        digest.update(chunk)
+actual = digest.hexdigest()
+assert actual == m["sha256"], f"archive checksum mismatch: {actual} != {m['sha256']}"
+print(f"{m['filename']} verified against MANIFEST.json")
+PY
 ```
 
 **Verify before you use anything.** Restoring from a truncated download during an outage costs more
-time than this check does.
+time than this check does. If the digests differ, pick the previous committed `RUN_ID` rather than
+extracting anyway.
 
 ```bash
-tar -xzf "k3s-$DATE.tar.gz"
+ARCHIVE=$(python3 -c 'import json;print(json.load(open("MANIFEST.json"))["archive"]["filename"])')
+tar -xzf "$ARCHIVE"
 ls -la          # MANIFEST.json  state.db  fs-root/  host-facts/
 ```
 
@@ -137,9 +168,35 @@ ls /var/lib/rancher/k3s/server/db/ 2>/dev/null || echo "no datastore yet — cor
 ```bash
 VER=$(python3 -c 'import json;print(json.load(open("MANIFEST.json"))["k3s_version"])')
 aws s3 cp "s3://$BUCKET/k3s-release/$VER/k3s" ./k3s
+
+# Verify against the manifest you already authenticated, not against the
+# sidecar next to the binary: the manifest records the digest of the binary
+# that actually produced this backup.
+python3 - <<'PY'
+import hashlib, json
+expected = json.load(open("MANIFEST.json"))["k3s_binary_sha256"].split()[0]
+if expected == "unknown":
+    raise SystemExit("this manifest predates binary checksums - fall back to k3s.sha256 and "
+                     "confirm `k3s --version` matches the manifest before proceeding")
+digest = hashlib.sha256()
+with open("k3s", "rb") as fh:
+    for chunk in iter(lambda: fh.read(1 << 20), b""):
+        digest.update(chunk)
+actual = digest.hexdigest()
+assert actual == expected, f"k3s binary mismatch: {actual} != {expected}"
+print("vaulted k3s binary verified against MANIFEST.json")
+PY
+
 sudo install -m 0755 -o root -g root ./k3s /usr/local/bin/k3s
 for c in kubectl crictl ctr; do sudo ln -sf /usr/local/bin/k3s /usr/local/bin/$c; done
+k3s --version        # must print $VER
 ```
+
+If the digests differ, stop. Either the vaulted object was overwritten or it belongs to a different
+build; use S3 version history to retrieve the version whose digest matches the manifest. Never
+install an unverified release artifact during recovery. The `k3s.sha256` object sitting beside the
+binary is a convenience for anyone reading the bucket without a manifest in hand — it is not the
+authority, because whoever could overwrite the binary could overwrite that file too.
 
 The systemd unit comes from the archive in step 4, which is the only other thing `install.sh` would
 have given you. Skip straight to step 4 and run `daemon-reload` there.
@@ -160,6 +217,7 @@ sudo rm -f /var/lib/rancher/k3s/server/db/state.db-wal \
            /var/lib/rancher/k3s/server/db/state.db-shm
 
 sudo systemctl daemon-reload
+sudo systemctl enable k3s
 ```
 
 `fs-root/` carries `server/tls/`, `server/cred/`, `server/token`, `server/manifests/`,
@@ -185,9 +243,9 @@ If `k3s secrets-encrypt` was enabled on the old server, `cred/encryption-config.
 Skip this entirely if the replacement keeps `45.90.98.51`. If the address changed, deal with it
 **now**, before the first start.
 
-The restored `tls/` contains the cluster CA **and its private key**, so K3s issues fresh
-certificates for the new address by itself on startup. **Nothing needs regenerating.** What does
-need attention:
+The restored `tls/` contains certificates issued for the old endpoint. Changing `--tls-san` does
+**not** prove that the restored API-serving certificate was reissued for the new address. Update
+the configured SAN before startup, then inspect the actual certificate after startup:
 
 | Check | Do |
 |-------|----|
@@ -196,6 +254,16 @@ need attention:
 | DNS records | Repoint anything resolving to the old address |
 | Hardcoded IPs in services | `kubectl get svc -A -o wide \| grep 45.90.98.51` — these will **not** fix themselves |
 | Firewall rules from `host-facts/` | May still reference the old network |
+
+After step 6, verify the SAN rather than assuming it:
+
+```bash
+echo | openssl s_client -connect <new-ip>:6443 2>/dev/null |
+  openssl x509 -noout -ext subjectAltName
+```
+
+If the new address is absent, follow the K3s certificate-rotation procedure for the API server,
+then restart K3s and verify the SAN again. Never rotate the cluster CA.
 
 ### Step 6 — Start K3s and verify the control plane
 
@@ -246,12 +314,13 @@ here — they came back with the datastore. Their **volumes are empty**; step 9 
 ```bash
 cat > ./velero-credentials <<'EOF'
 [default]
-aws_access_key_id=<a temporary read-capable key, or the writer key>
+aws_access_key_id=<temporary recovery credentials or the dedicated Velero key>
 aws_secret_access_key=<…>
 EOF
 chmod 600 ./velero-credentials
 
 export S3_BUCKET=k3-master-dr AWS_REGION=ap-south-1 CREDS_FILE=./velero-credentials
+export KUBELET_ROOT_DIR=/var/lib/kubelet   # use the path verified on this node
 ./scripts/velero/install-velero.sh
 
 # make the backup location read-only until you have verified the restore
@@ -284,18 +353,27 @@ silently do nothing. Read the box before running anything.
 > So the workloads that own volumes have to go first. That is what makes room for Velero to
 > re-create them properly.
 
-Only the `monitoring` namespace has PVCs ([01 §11](01-discovery-baseline.md)), so the destructive
-step is confined to it. SBE/COW and ArgoCD are untouched.
+Only the `monitoring` namespace currently has PVCs ([01 §11](01-discovery-baseline.md)). Suspend
+ArgoCD first; otherwise it can recreate monitoring workloads before Velero injects the restore
+helper and the restore can finish with empty data.
 
 ```bash
-velero backup get     # pick the backup closest to your k3s/ date
+velero backup get     # record candidate creation/completion timestamps
 
-# 1. clear the namespace that owns the volumes. With local-path, deleting the
+# Job 1 and Velero are not one transaction. Conservative default: choose the
+# newest scheduled Velero backup created no later than MANIFEST.run_timestamp.
+# Record RUN_ID, backup name and both timestamps in the incident log.
+
+# 1. stop GitOps reconciliation for the restore window
+kubectl -n argocd scale statefulset argocd-application-controller --replicas=0
+kubectl -n argocd rollout status statefulset argocd-application-controller --timeout=5m
+
+# 2. clear the namespace that owns the volumes. With local-path, deleting the
 #    PVCs deletes the (currently empty) directories too — that is intended.
 kubectl delete namespace monitoring
 kubectl wait --for=delete namespace/monitoring --timeout=10m
 
-# 2. let Velero rebuild it: PVCs, workloads AND pods, so the node-agent runs
+# 3. let Velero rebuild it: PVCs, workloads AND pods, so the node-agent runs
 velero restore create restore-monitoring-$(date +%s) \
   --from-backup <backup-name> \
   --include-namespaces monitoring \
@@ -313,6 +391,9 @@ moved — see the box above, and [gap 6](05-gaps-and-open-questions.md).
 ```bash
 kubectl -n monitoring get pvc                      # all six Bound
 sudo du -sh /var/lib/rancher/k3s/storage/          # roughly the original ~7.8 GB, not near zero
+
+# Resume reconciliation only after old Prometheus/Loki data has been verified.
+kubectl -n argocd scale statefulset argocd-application-controller --replicas=1
 ```
 
 > **If anything outside `monitoring` ever gains a PVC**, add its namespace to the same treatment
@@ -349,7 +430,7 @@ is no separate export to import.
 Only once step 11 has actually passed, give the rebuilt server back its ability to write backups:
 
 ```bash
-# replace the Secret with the backup-writer credential, then:
+# replace the Secret with the dedicated Velero credential, then:
 kubectl -n velero patch backupstoragelocation default \
   --type merge -p '{"spec":{"accessMode":"ReadWrite"}}'
 
@@ -384,6 +465,9 @@ deleting a PVC destroys its files instantly.
 ```bash
 velero backup get
 
+# Never guess a selector from a Helm chart name.
+kubectl get secret -n monitoring --show-labels
+
 velero restore create restore-$(date +%s) \
   --from-backup <backup-name> \
   --include-namespaces monitoring \
@@ -399,19 +483,32 @@ Works the same for `deployments`, `configmaps`, `ingresses`, `roles`, `rolebindi
 
 ### One PVC's data
 
-> **Same rule as §A step 9: the data arrives with the pod, not with the claim.** Restoring only
-> `persistentvolumeclaims,persistentvolumes` gives you a correctly-named, freshly provisioned,
-> **empty** volume. The restore has to include the workload so Velero re-creates the pod.
+> **Same rule as §A step 9: the data arrives with a pod Velero creates.** Scaling a Deployment to
+> zero is insufficient: the owner still exists, Velero skips it, and Velero documents that FSB
+> restore does not work while the owner remains scaled to zero. Delete the owner and claim only
+> after confirming the selected backup contains a completed PodVolumeBackup.
 
 ```bash
-# 1. take the workload down — the volume must not be in use
-kubectl -n monitoring scale deploy/grafana --replicas=0
+# 1. prove the source backup contains this pod volume before deleting anything
+velero backup describe <backup-name> --details
+kubectl -n velero get podvolumebackups \
+  -l velero.io/backup-name=<backup-name> -o wide
 
-# 2. delete the claim. With local-path this destroys the directory — that is
-#    the point, and it is why the restore below can provision a clean one.
+# 2. stop GitOps and preserve the current data if this is corruption rather
+#    than an already-lost PVC
+kubectl -n argocd scale statefulset argocd-application-controller --replicas=0
+kubectl -n monitoring scale deploy/grafana --replicas=0
+# Optional emergency copy before deletion:
+# sudo tar -C <current-local-path-directory> -czf /root/grafana-before-restore.tgz .
+
+# 3. delete both the owner and claim. Deleting only the claim, or leaving the
+#    Deployment scaled to zero, can produce a Completed restore with no data.
+kubectl -n monitoring delete deploy grafana
+kubectl -n monitoring wait --for=delete pod \
+  -l app.kubernetes.io/name=grafana --timeout=5m
 kubectl -n monitoring delete pvc grafana
 
-# 3. restore the app: claim, workload and pod together. No --include-resources:
+# 4. restore the app: claim, workload and pod together. No --include-resources:
 #    narrowing it to the claim is exactly what silently restores no data.
 velero restore create pvc-restore-$(date +%s) \
   --from-backup <backup-name> \
@@ -431,6 +528,7 @@ whether the data comes back:
 
 ```bash
 kubectl -n monitoring get pod,pvc -l app.kubernetes.io/name=grafana
+kubectl -n argocd scale statefulset argocd-application-controller --replicas=1
 ```
 
 **Verify inside the pod, not from the outside** — query Prometheus for a timestamp from before the
@@ -461,9 +559,9 @@ but is **not** this. This needs a machine that boots.
    it here is what makes it recur:
 
    ```bash
-   aws s3 cp "s3://$BUCKET/k3s/daily/$DATE/" . --recursive
-   sha256sum -c ./*.sha256
-   tar -tzf "k3s-$DATE.tar.gz" | head        # MANIFEST.json state.db fs-root/ host-facts/
+   aws s3 cp "s3://$BUCKET/$PREFIX/" . --recursive
+   # verify the COMPLETE.json -> MANIFEST.json -> archive chain, as in §A step 1
+   tar -tzf "$ARCHIVE" | head        # MANIFEST.json state.db fs-root/ host-facts/
    ```
 
 3. Work through **§A steps 1–11** exactly as written, from the current daily backup.
@@ -471,7 +569,8 @@ but is **not** this. This needs a machine that boots.
    - Install K3s from `k3s-release/` in the bucket, not from `get.k3s.io`. That proves step 3's
      fallback works while you have time to fix it.
    - Restore onto a host with a **different IP**, so step 5 gets exercised at least once.
-5. Then run **§B once** against a scratch namespace on the test cluster.
+5. Run §B's **one-object** restore once. The destructive PVC path is already exercised by §A
+   step 9; do not repeat it against production-shaped data merely to satisfy a checklist.
 6. **Once a year, or after any Velero upgrade, run §D instead of §A.** It is the flow you would
    reach for when the datastore is the thing that's broken, and it is the only one that proves
    Velero can rebuild the cluster without help from Job 1.
@@ -495,36 +594,33 @@ but is **not** this. This needs a machine that boots.
   document's header table and settle [02 §1](02-backup-strategy.md#1-two-numbers-to-agree-on-first--still-open).
 - **Everything that didn't match this runbook**, and fix the runbook to match reality rather than
   intent.
-- Whether the monitoring volumes came back **application-consistent**. File-system backup of a
-  running database is crash-consistent — like pulling the power cord. Prometheus normally replays
-  its WAL cleanly; MinIO and Loki's boltdb-shipper are less forgiving. If one of them doesn't
-  recover, *that* is when to add a Velero pre-backup hook — not pre-emptively.
+- Whether each monitoring volume came back usable. Velero FSB reads a live filesystem over time;
+  it is **not a point-in-time or crash-consistent snapshot**. Monitoring history is best-effort
+  unless an application-native backup or tested quiesce hook is added for that component.
 - The date, and the next due date.
 
 Then tear the VM down.
 
 ---
 
----
-
 ## D — Rebuilding from Velero alone, into a fresh cluster
 
-**Use this when the datastore itself is the problem**, or when you are deliberately moving to a
-different K3s version. §A restores `state.db` and therefore restores whatever was wrong with it;
-this flow doesn't touch it at all.
-
-It is also the *easier* of the two, because nothing exists yet — the trap in §A step 9 cannot
-happen, since Velero creates every object including the pods.
+**Use this when every usable datastore backup is suspect.** Do not use it as a shortcut for a K3s
+upgrade. Restore onto the source K3s version first; upgrade only after recovery has passed.
 
 What you give up: the cluster's identity. A fresh cluster means a **new CA, new token, new node
 identity**, so every existing kubeconfig and anything that trusted the old CA must be re-issued.
 That is the trade — a clean cluster with your data, instead of the same cluster with its history.
 
 ```bash
-# 1. fresh host, fresh K3s. Version need not match the backup — that is the point
-curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="<current or target>" sh -
+# 1. download and verify a COMPLETE Job 1 set as in §A step 1. It provides
+#    MANIFEST.json and fs-root/, even though this flow does not restore state.db.
 
-# 2. restore only the identity-free config you still want, from the archive:
+# 2. fresh host, fresh identity, source-compatible K3s version
+VER=$(python3 -c 'import json;print(json.load(open("MANIFEST.json"))["k3s_version"])')
+curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="$VER" sh -
+
+# 3. restore only the identity-free config you still want, from the archive:
 #    registries.yaml (private registry credentials) and the hand-edited
 #    traefik-helmchartconfig.yaml. NOT tls/, cred/ or token.
 sudo cp -a fs-root/etc/rancher/k3s/registries.yaml /etc/rancher/k3s/
@@ -532,17 +628,38 @@ sudo cp -a fs-root/var/lib/rancher/k3s/server/manifests/traefik-helmchartconfig.
            /var/lib/rancher/k3s/server/manifests/
 sudo systemctl restart k3s
 
-# 3. Velero, then everything at once
+# 4. install the pinned Velero version with the verified kubelet root and keep
+#    the BackupStorageLocation ReadOnly
+export KUBELET_ROOT_DIR=/var/lib/kubelet
 ./scripts/velero/install-velero.sh
-velero restore create rebuild-$(date +%s) --from-backup <backup-name> --wait
-velero restore describe <restore-name> --details
+kubectl -n velero patch backupstoragelocation default \
+  --type merge -p '{"spec":{"accessMode":"ReadOnly"}}'
+
+# 5. restore in phases. Do not restore kube-system, velero, node objects,
+#    StorageClasses or old PV objects over the new cluster's built-ins.
+velero restore create rebuild-foundation-$(date +%s) \
+  --from-backup <backup-name> \
+  --include-resources customresourcedefinitions.apiextensions.k8s.io \
+  --wait
+
+velero restore create rebuild-workloads-$(date +%s) \
+  --from-backup <backup-name> \
+  --exclude-namespaces kube-system,kube-public,kube-node-lease,velero \
+  --exclude-resources nodes,persistentvolumes,storageclasses.storage.k8s.io \
+  --wait
 ```
 
-Then re-issue kubeconfigs, re-point ArgoCD at Git, and work through §A step 11's checks. Expect to
-redo anything that depended on the old cluster CA.
+Review each restore's warnings before continuing. API-version conversion is not guaranteed across
+large Kubernetes jumps; this is why the source version is restored first.
 
-> Velero restores namespaces, CRDs, RBAC, Secrets, workloads **and** pod volume data in one pass
-> here. This is Velero doing what it is actually designed for; §A is the more constrained case.
+Then re-issue kubeconfigs, re-point ArgoCD at Git, and work through §A step 11's checks. Resume
+backup writes and apply schedules only after validation. Expect to redo anything that depended on
+the old cluster CA.
+
+> A clean-cluster rebuild is a migration, not a blind replay. Cluster-scoped resources and
+> Kubernetes built-ins are restored selectively to avoid replacing the new cluster's own control
+> plane objects.
+
 ## Which flow for which incident
 
 | What happened | Do |
@@ -555,5 +672,5 @@ redo anything that depended on the old cluster CA.
 | Certificates lost, host is fine | §A step 4 (`fs-root/` only) → step 6 |
 | ArgoCD is wiped | §B scoped to the `argocd` namespace |
 | Complete server loss, or moving machines | §A, all 12 steps |
-| Moving to a different K3s version deliberately | §D |
+| Moving to a different K3s version deliberately | Not a restore. §A restores the **source** version; upgrade after that with K3s's own upgrade path. Use §D only if the datastore is suspect too |
 | Nothing — it's the quarterly check | §C |

@@ -1,0 +1,13 @@
+[Unit]
+Description=Daily verification of the latest Velero backup
+
+[Timer]
+Unit=velero-backup-check.service
+OnCalendar=*-*-* 06:30:00 UTC
+Persistent=true
+RandomizedDelaySec=300
+AccuracySec=1min
+
+[Install]
+WantedBy=timers.target
+

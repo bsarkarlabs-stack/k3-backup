@@ -6,16 +6,16 @@ Built on the facts confirmed in [01 — Discovery Baseline](01-discovery-baselin
 > If the server dies: get a fresh Ubuntu server → install the matching K3s version → restore our
 > backup → bring the apps and data back → check everything actually works.
 
-**How we get there: two jobs. Nothing else runs on a schedule.**
+**How we get there: two backup jobs plus one lightweight verification timer.**
 
 | | Job 1 — K3s server backup | Job 2 — Velero |
 |---|---|---|
 | Runs where | systemd timer on `k3-master` | Inside the cluster |
-| Runs when | 02:15 UTC daily | 03:00 UTC daily (+ 04:00 Sunday) |
+| Runs when | 02:15 UTC daily | 03:30 UTC: daily Monday–Saturday, weekly Sunday |
 | Backs up | The SQLite datastore, the cluster's identity, and the config K3s starts with | Every Kubernetes object in every namespace, plus all PVC data |
-| Restores | **This server**, rebuilt from bare metal | **Any cluster** — object-level, portable across K3s versions |
+| Restores | **This server**, rebuilt from bare metal | Objects and PVC data into a source-compatible cluster; cross-version recovery is a tested migration, not guaranteed portability |
 | Lands in | `s3://k3-master-dr/k3s/` | `s3://k3-master-dr/velero/` |
-| Produces | One `.tar.gz` + its `.sha256` + `MANIFEST.json` | A Kopia repository Velero manages itself |
+| Produces | Archive + checksum + manifest + last-written completion marker | A Kopia repository Velero manages itself |
 
 They overlap a little, and that's deliberate — the overlap is the fallback, not waste. Job 1 alone
 can rebuild this exact server. Job 2 alone can rebuild the workloads anywhere, and it's the only
@@ -60,10 +60,9 @@ Writing this down is what stops the design drifting into either paranoia or fals
 |--------|----------|---------|
 | Disk failure, host loss, theft, fire | ✅ | Everything is off-server in S3, in another country |
 | Someone deletes a PVC or a Secret by accident | ✅ | Job 2 (Velero). **Job 1 cannot do this** |
-| A bad backup overwrites a good one | ✅ | Bucket versioning |
-| `k3-master` is compromised and the attacker tries to delete the backups | ✅ | The credential on the server has **no delete** outside `velero/` |
-| `k3-master` is compromised and the attacker tries to *read* the backups | ✅ | The same credential has **no read** outside `velero/` — see §3 |
-| The AWS credential leaks and someone re-encrypts or tampers with objects | ⚠️ Partly | They cannot delete, and versioning keeps the originals — but noncurrent versions expire after 2 days |
+| A normal rerun partially uploads or overwrites a set | ✅ | Unique run prefix, checksum, and `COMPLETE.json` uploaded last |
+| The Job 1 credential leaks | ⚠️ Partly | It cannot read/delete or access `velero/`, but it **can overwrite** Job 1 keys. Version history lasts 31 days |
+| The Velero credential leaks | ⚠️ Partly | Object access is confined to `velero/`, which is readable/deletable because Kopia and TTL require it. It can also list key *names* bucket-wide |
 | Full ransomware / AWS account compromise | ❌ | **Deliberately out of scope.** See §9 for what it would take |
 | A whole AWS region going down | ❌ | Out of scope. One server with no failover is a far bigger single point of failure than a region |
 
@@ -80,19 +79,26 @@ One bucket. Three prefixes that we write, one that Velero owns.
 ```text
 s3://k3-master-dr/
 ├── k3s/
-│   ├── daily/YYYY-MM-DD/     job 1 writes here every day
-│   └── weekly/YYYY-MM-DD/    job 1 writes here on Sundays too
+│   ├── daily/YYYY-MM-DDTHHMMSSZ/     one unique committed run
+│   └── weekly/YYYY-MM-DDTHHMMSSZ/    Sunday copy
 ├── k3s-release/<version>/    the k3s binary, written once per version (§8)
 └── velero/                   Velero owns this — we never touch it by hand
 ```
 
-Each `k3s/` folder holds three objects, and that is the whole restore set:
+Each successful `k3s/` folder holds four objects:
 
 ```text
-k3s-YYYY-MM-DD.tar.gz          ~20 MB — the entire backup, one file
-k3s-YYYY-MM-DD.tar.gz.sha256   verify this before trusting the archive
+k3s-<run-id>.tar.gz            ~20 MB — the entire backup, one file
+k3s-<run-id>.tar.gz.sha256     convenience copy of the digest
 MANIFEST.json                  which K3s version to install. Read this first
+COMPLETE.json                  uploaded last; ignore a prefix without it
 ```
+
+Verification runs **marker → manifest → archive**: `COMPLETE.json` carries the manifest's digest and
+`MANIFEST.json` carries the archive's, so one authenticated file leads to the next. The sidecar
+`.sha256` is convenience only — anyone able to alter the archive could alter a checksum sitting
+loose beside it, so a restore compares against the manifest instead
+([03 §A step 1](03-restore-runbook.md#step-1--pick-a-backup-and-read-its-manifest)).
 
 `MANIFEST.json` is also *inside* the archive. It sits outside as well so a restore can learn the
 K3s version and the archive's checksum without downloading the archive first.
@@ -114,7 +120,7 @@ Inside the archive:
 | Block all public access | on | Non-negotiable for a bucket holding the cluster CA |
 | Versioning | on | The cheapest protection against a bad backup overwriting a good one |
 | Default encryption | **SSE-S3** | S3 encrypts every object on arrival, with nothing to configure, rotate or lose. See below |
-| Lifecycle rules | on `k3s/daily/`, `k3s/weekly/`, `_preflight/` — **never on `velero/`** | §6 |
+| Lifecycle rules | current expiry on Job 1; noncurrent-only expiry on `velero/` and releases | §6 |
 
 > ### Why SSE-S3 and not a customer-managed KMS key
 >
@@ -129,20 +135,20 @@ Inside the archive:
 > the backups. But the credential on the server held `kms:Decrypt` *and* `s3:GetObject`, so that
 > gate was already open to the one credential most likely to leak.
 >
-> **The real fix was cheaper and stronger: take read access away from the server.** With SSE-S3
-> plus a write-only credential, a compromised `k3-master` can neither read nor delete the backups.
-> S3 encrypts every new object at rest by default either way.
+> **The practical fix is to take read access away from Job 1.** Its environment credential cannot
+> read or delete Job 1 backups. This does not make a root-compromised Kubernetes node immutable:
+> root can reach the Velero Secret, and any PutObject credential can overwrite keys it owns.
+> Versioning limits that risk; Object Lock or a separate account is the stronger control.
 >
 > Switch to SSE-KMS only if a client or a compliance requirement specifically demands a
 > customer-managed key. It is a one-line bucket setting plus two IAM actions — not a redesign.
 
-### One credential, and what it deliberately cannot do
+### Two workload credentials, separated by failure domain
 
-| Allowed | On |
-|---------|-----|
-| `s3:ListBucket`, `s3:GetBucketLocation` | the bucket |
-| `s3:PutObject`, `s3:AbortMultipartUpload`, `s3:ListMultipartUploadParts` | `k3s/*`, `k3s-release/*`, `_preflight/*` |
-| `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`, `s3:AbortMultipartUpload`, `s3:ListMultipartUploadParts` | `velero/*` **only** |
+| Identity | Allowed actions | Scope |
+|----------|-----------------|-------|
+| Job 1 | put/multipart only; list restricted by `s3:prefix` | `k3s/*`, `k3s-release/*`, `_preflight/*` |
+| Velero | put/get/delete/multipart; list is **bucket-wide** | objects: `velero/*` only |
 
 > This table must match [07 §2.5](07-setup.md) exactly. A summary that under-states the policy is an
 > invitation to "tighten" the real one to match it — and Velero's PVC uploads are multipart, so
@@ -153,13 +159,17 @@ Read the gaps in that table, because they are the point:
 - **No `GetObject` on `k3s/*`.** The server can write backups and never read one back. It confirms
   its own uploads by *listing* them and comparing sizes, which needs no read permission.
 - **No `DeleteObject` on `k3s/*`.** Expiry there is entirely S3's job, via lifecycle rules.
-- **`velero/*` is the exception, and it has to be.** Velero expires its own backups using each
+- **Job 1 has no access to `velero/*`.** Leaking `/etc/k3s-backup/backup.env` does not expose Kopia.
+- **Isolation is on objects, not on key names — for Velero.** Velero's `s3:ListBucket` has no
+  `s3:prefix` condition, because Velero's and Kopia's listing patterns are not a stable contract and
+  a wrong condition breaks backup or TTL expiry silently. That key can therefore *enumerate* keys
+  outside `velero/`; it cannot read, write or delete any of them. Job 1's listing is prefix-scoped,
+  since every list call it makes names a prefix we control ([07 §2.5](07-setup.md#25--create-separate-job-1-and-velero-credentials)).
+- **The Velero credential is the exception, and it has to be.** Velero expires backups using each
   Schedule's `ttl` — TTL expiry *is* Velero issuing deletes. Without that permission nothing under
   `velero/` ever expires and the retention policy in §6 becomes fiction. Do not "harden" it away.
 
-**Restores use your normal AWS admin or SSO login**, not a stored key. There is no second
-long-lived credential to keep in a vault and rotate — the previous design had one and it was pure
-operational burden. What this *does* require, and it is written down as a gap rather than assumed:
+**Restores use your normal AWS admin or SSO login**, not a stored restore key. What this requires:
 **at least two named people must have AWS access, and the bucket name and region must be recorded
 somewhere outside AWS** ([gap 5](05-gaps-and-open-questions.md#5-who-can-actually-perform-a-restore)).
 
@@ -184,6 +194,10 @@ Everything in this table is load-bearing except the last row.
 | `MANIFEST.json` | generated each run | The exact K3s version and start command. Nothing else in the backup records them: `uname` is the kernel, and K3s isn't a dpkg package. Restoring at the wrong version is the most common self-inflicted restore failure. |
 | Host fact sheet | plain text in `host-facts/` | *Optional* (`INCLUDE_HOST_FACTS=0` to skip). Addresses, routes, firewall rules, timezone, disk layout, package list, netplan. ~50 KB. |
 
+The script fingerprints `token`, `tls/` and `cred/` before taking the database snapshot and again
+after staging identity. If K3s rotates any of them during the run, the job aborts rather than
+uploading a mixed cryptographic restore set.
+
 ### Why one archive instead of four files
 
 The previous design uploaded `state.db`, `k3s-identity.tar.gz`, `node-config.tar.gz` and
@@ -192,8 +206,9 @@ was nothing to gain from it either, because all four are always restored togethe
 means one checksum, one download, one thing that cannot be half-matched, and gzip takes the ~64 MB
 datastore down to roughly 20 MB on the way past.
 
-The one thing that stayed outside the archive is `MANIFEST.json`, because you read it *before*
-deciding to download anything.
+`MANIFEST.json` stays outside because you read it first. `COMPLETE.json` is the commit marker: it
+is uploaded only after the other objects pass size verification. Unique run prefixes mean a failed
+retry cannot leave an old marker pointing at a newly overwritten archive.
 
 ### The host fact sheet is facts, not config
 
@@ -247,7 +262,9 @@ Install flags that matter, and why:
 --use-node-agent --uploader-type kopia
 ```
 
-File System Backup is documented by Velero as beta for some volume types, which is exactly why the
+The installer pins Velero `v1.18.0` with AWS plugin `v1.14.1`, a compatible pair tested against
+Kubernetes 1.34-era clusters, and requires the verified kubelet root through
+`--kubelet-root-dir`. File System Backup is exactly why the
 restore test in §10 is mandatory rather than advisory.
 
 ### Why PVC data has to go through Velero
@@ -269,27 +286,45 @@ PVC, the files on disk are gone immediately. No grace period, no orphan, no recy
 
 | Time (UTC) | What runs | Configured in |
 |---|---|---|
-| 02:15 daily | Job 1. On Sundays it uploads the same three objects a second time under `k3s/weekly/`. | `k3s-backup.timer` |
-| 03:00 daily | Job 2, daily tier | `Schedule/daily`, `ttl: 168h` |
-| 04:00 Sunday | Job 2, weekly tier | `Schedule/weekly`, `ttl: 720h` |
+| 02:15 daily | Job 1. On Sundays it uploads the same four-object committed set under `k3s/weekly/`. | `k3s-backup.timer` |
+| 03:30 Monday–Saturday | Job 2, daily tier | `Schedule/daily`, `ttl: 168h` |
+| 03:30 Sunday | Job 2, weekly tier (replaces daily that day) | `Schedule/weekly`, `ttl: 720h` |
 
-The 45-minute gap keeps Velero's node-agent off the disk while the SQLite reader is running, and
-the Sunday runs are staggered so the weekly Velero backup never overlaps the daily one.
+Job 1's latest possible timeout is before 03:30. Sunday has one Velero schedule, not two, so the
+daily and weekly FSB jobs cannot overlap.
 
-**Retention is 7 daily + 4 weekly**, expressed twice: as S3 lifecycle rules for Job 1, as Velero
-TTL for Job 2.
+These jobs are **not one transaction or one recovery point**. Job 1 records cluster state near
+02:15; Velero starts later and reads each live volume over an interval. During recovery, record the
+exact Job 1 `run_id`, Velero backup name, start/completion timestamps, and the reason that pair was
+chosen. The conservative default is the newest Velero backup whose creation time is not newer than
+Job 1's `run_timestamp`; using a later volume image is a deliberate application-specific decision.
+
+Velero FSB is not crash-consistent or application-consistent: files can change while the scan is
+running. Monitoring history is therefore best-effort unless the owner explicitly requires a
+tested application-native export or quiesce hook.
+
+**Retention target: one restore point for each of the last 7 days, plus 4 Sundays.** Job 1 expresses
+it with S3 lifecycle rules; Job 2 expresses it with Velero TTL.
 
 | Location | Written | Expiry mechanism | Keeps |
 |----------|---------|------------------|-------|
 | `k3s/daily/` | Daily | S3 lifecycle — expire **8 days** after creation | 7–8 restore points |
 | `k3s/weekly/` | Sundays | S3 lifecycle — expire **31 days** after creation | 4–5 restore points |
 | `k3s-release/` | Once per K3s version | **No rule.** Never expires | Every version we ever ran |
-| `velero/` daily | Daily | Velero `ttl: 168h` | 7 backups |
-| `velero/` weekly | Sundays | Velero `ttl: 720h` | 4 backups |
+| `velero/` daily | Monday–Saturday | Velero `ttl: 168h` | 6 weekday backups |
+| `velero/` weekly | Sundays | Velero `ttl: 720h` | 4 Sunday backups |
+| noncurrent versions under `velero/` | overwrite/delete history | S3 noncurrent-only expiry | 35 days |
+| noncurrent versions under `k3s-release/` | overwrite history | S3 noncurrent-only expiry | 365 days |
 
 Two prefixes exist under `k3s/` for one reason: an S3 lifecycle rule can only say *"expire N days
 after creation"*, so anything kept for a different length of time needs its own prefix. Job 1 knows
 whether it's Sunday, so it just uploads the same files twice that day.
+
+Velero's counts differ from Job 1's on purpose. Sunday runs the weekly schedule *instead of* the
+daily one, so the daily tier holds six backups rather than seven. The last seven calendar days are
+still covered — six weekday backups plus that week's Sunday backup — and the Sunday copy is the one
+retained for a month. Two schedules firing at the same hour would put two concurrent file-system
+scans on one disk, which is a worse trade than an unevenly-named tier.
 
 > ### Never put a current-version lifecycle rule on `velero/`
 >
@@ -314,8 +349,8 @@ volumes, plus ~70 MB per K3s version. Single-digit dollars a month.
 | # | Alert | Where it runs | Threshold |
 |---|-------|---------------|-----------|
 | 1 | **No Job 1 backup arrived** | Off-server dead-man's switch | 26 hours |
-| 2 | Velero's last backup isn't `Completed` | Prometheus/Alertmanager, in-cluster | 26 hours stale |
-| 3 | **Velero's last backup contains fewer than 6 pod volumes** | Prometheus/Alertmanager, in-cluster | any run below 6 |
+| 2 | **No verified Velero heartbeat** | Off-server dead-man's switch | 30 hours |
+| 3 | Latest scheduled Backup/PVB set is failed or incomplete | Host verifier; suppresses alert 2 heartbeat | any failure or fewer than configured minimum |
 | 4 | Root disk free space low | Prometheus/Alertmanager, in-cluster | under 10% |
 
 ### Alert 3 exists because `Completed` is not the same as "it backed something up"
@@ -328,35 +363,38 @@ restore discovered the truth.
 So the assertion has to be about **volume count, not backup status**. Each volume the node-agent
 handles produces a `PodVolumeBackup` object:
 
-```bash
-# expect 6 — Prometheus, Loki, MinIO, Loki write, Loki backend, Grafana/Alertmanager
-kubectl -n velero get podvolumebackups \
-  -l velero.io/backup-name="$(velero backup get -o name | head -1 | cut -d/ -f2)" \
-  --field-selector status.phase=Completed --no-headers | wc -l
-```
+[`check-last-backup.sh`](../scripts/velero/check-last-backup.sh) selects the newest `daily` or
+`weekly` scheduled backup by timestamp, verifies freshness and phase, then requires every
+PodVolumeBackup to be `Completed` and at least `MIN_EXPECTED_PVBS` to exist. It pings a dedicated
+external URL only after all checks pass. A raw PVC count is not used: unmounted claims and multiple
+pod mounts mean PVC count and PodVolumeBackup count are not a reliable one-to-one invariant.
 
-Alert if that number drops below the number of PVCs the cluster actually has. **Update the expected
-count whenever a PVC is added** — or better, compare it against `kubectl get pvc -A` at alert time
-so it maintains itself.
+The ping is **edge-triggered on a backup it has not reported before.** The verifier records the UID
+of the backup it last reported (`/var/lib/k3s-backup/velero-last-reported`) and refuses to ping the
+same one twice. Without that, a single skipped 03:30 schedule would still be "verified" from
+yesterday's backup, which is inside the 30 h freshness window — the dead-man timer would reset and
+the missed run would never surface. The UID is written only after the ping succeeds, so a failed
+ping is retried on the next run instead of being silently swallowed.
 
-### Alert 1 is the important one, because it survives the server
+### Both backup-success heartbeats survive server loss
 
-Alerts 2, 3 and 4 run inside the cluster we are trying to protect. If `k3-master` dies, they die
-with it — and the failure that matters most goes unreported. Alert 1 has to live somewhere else.
+Alerts 1 and 2 terminate outside the cluster. The verification for alert 2 runs on the host, but a
+host outage stops its ping and therefore still raises the external dead-man alert.
 
 It works as a **heartbeat**: the backup script pings a URL, and something outside this server raises
 the alarm when the ping stops arriving. Critically, the script pings *after* it has confirmed the
-three objects are actually in S3 at the right size — so the heartbeat means "the backup arrived",
+archive, checksum and manifest are verified and `COMPLETE.json` is in S3 — so the heartbeat means "the backup arrived",
 not "the script is pleased with itself". Set `HEARTBEAT_URL` in `/etc/k3s-backup/backup.env`; the
 script warns loudly if it is missing.
 
-> ⏳ **Open decision: which service receives the heartbeat.**
-> The script is channel-agnostic — any URL that expects a periodic GET works. Three realistic
+> ⏳ **Open decision: which service receives the two heartbeats.**
+> Both scripts are channel-agnostic — any URL that expects a periodic GET works. Use two checks,
+> so one job cannot hide failure of the other. Three realistic
 > options: a hosted dead-man's-switch (healthchecks.io, Cronitor — free tier, ~5 minutes to set
 > up); AWS-native (an EventBridge rule on S3 `ObjectCreated` under `k3s/daily/` feeding a
 > CloudWatch alarm that treats missing data as breaching); or an Alertmanager push gateway hosted
 > *outside* this cluster. Tracked as
-> [gap 2](05-gaps-and-open-questions.md#2-the-heartbeat-has-nowhere-to-report-to-yet). Until it is
+> [gap 2](05-gaps-and-open-questions.md#2-the-external-heartbeats-have-nowhere-to-report-yet). Until it is
 > decided, a missing backup is only visible to someone who goes looking.
 
 ### What we deliberately stopped doing
@@ -377,8 +415,8 @@ Two things make a restore harder the older the backup gets. Both are handled che
 
 **1. The matching K3s release might not be downloadable.** A restore wants the same version that
 made the backup, and `get.k3s.io` is not a promise about 2030. So the job uploads the `k3s` binary
-itself to `k3s-release/<version>/k3s`, **once per version** — the daily run after that is a no-op
-that costs one list call. About 70 MB per version we ever run, never expired.
+itself plus `k3s.sha256` to `k3s-release/<version>/`, **once per version** — later runs are no-ops
+that cost one list call. About 70 MB per version we ever run; current objects are never expired.
 
 `install.sh` is not needed alongside it: that script's real job is writing the systemd unit, and the
 unit is already in the archive. A restore is copy the binary, `chmod`, symlink `kubectl`/`crictl`/
@@ -386,19 +424,18 @@ unit is already in the archive. A restore is copy the binary, `chmod`, symlink `
 
 **2. Nobody remembers how this server was started.** `MANIFEST.json` records `k3s_version`,
 `k3s_version_raw`, the full `k3s_start_command` reconstructed from the systemd unit, the OS release,
-the kernel, the architecture, the hostname, and the archive's size and SHA-256.
+the kernel, architecture, hostname, archive size/SHA-256, and K3s binary SHA-256.
 
 ---
 
 ## 9. The immutability decision — made, and on the record
 
-**Scope: we protect against hardware failure, host loss, accidental deletion, and a compromised
-`k3-master`. We do not currently protect against a compromised AWS account.**
+**Scope: we protect against hardware failure, host loss and accidental deletion. A compromised
+node is only partly covered; a compromised AWS account is not covered.**
 
-What we have is enough for that scope: versioning is on, the server's credential cannot delete or
-read anything under `k3s/`, and expiry is S3's job rather than the server's. An attacker on
-`k3-master` can stop future backups from being written — they cannot destroy or read the existing
-ones.
+Job 1 cannot read or delete `k3s/`, but it can overwrite keys and root on the node can retrieve the
+Velero Secret. Versioning preserves overwritten Job 1 versions for 31 days; that is rollback
+history, not immutability.
 
 If ransomware or AWS credential compromise ever comes into scope, the answer is **S3 Object Lock in
 compliance mode** (or a separate AWS account holding the bucket), decided once and applied to a new
@@ -460,7 +497,7 @@ The design is only as good as these answers. See
 | # | Gap |
 |---|-----|
 | 1 | **RPO/RTO are not signed off** — §1 is written against an assumption |
-| 2 | **The heartbeat has nowhere to report to yet** — §7 alert 1 is designed, not wired |
+| 2 | **The two heartbeats have nowhere to report yet** — scripts exist, endpoints are not wired |
 | 3 | **Nothing has ever been restored** — §10 |
 | 4 | **Where Traefik's TLS certificates come from.** If Traefik issues them itself and keeps `acme.json` in an `emptyDir`, nothing here backs it up and a restore comes back with broken HTTPS and no warning |
 | 5 | **Velero's node-agent vs. K3s's kubelet root.** A path mismatch starts cleanly and backs up *nothing* — it looks like an empty backup, not an error |

@@ -198,5 +198,5 @@ This takes effect immediately, and only affects that one specific key.
 
 Deploy keys don't expire on their own — they stay valid forever unless removed. Rotate this key
 whenever the developer who has it leaves, if their device is lost, or at least every 12 months —
-whichever happens first. This is the same rule we follow for the backup login credentials, see
-[gap #16](../../../issues/16).
+whichever happens first. This is independent of the AWS workload credentials; their owners and
+rotation procedure are recorded during [setup stage 2.5](07-setup.md#25--create-separate-job-1-and-velero-credentials).

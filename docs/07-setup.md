@@ -10,7 +10,7 @@ Five stages, in order:
 | Stage | What it does | Where | Downtime risk |
 |-------|--------------|-------|---------------|
 | [1](#stage-1--validate-the-server) | Validate — is everything we assumed still true? | `[node]` | **None** — read-only |
-| [2](#stage-2--create-the-bucket-and-the-one-credential) | Create the bucket and the one AWS credential | `[local]` | **None** — doesn't touch the server |
+| [2](#stage-2--create-the-bucket-and-two-scoped-workload-credentials) | Create the bucket and two scoped AWS credentials | `[local]` | **None** — doesn't touch the server |
 | [3](#stage-3--deploy-job-1) | Deploy Job 1: the K3s backup + timer | `[node]` | **Very low** — only reads K3s's data |
 | [4](#stage-4--deploy-job-2-velero) | Deploy Job 2: Velero | `[local]` | Low — installs into the cluster |
 | [5](#stage-5--monitoring-and-the-restore-test) | Wire the alerts, then prove a restore works | both | **None** |
@@ -175,7 +175,7 @@ on a production server.
 
 ---
 
-## Stage 2 — Create the bucket and the one credential
+## Stage 2 — Create the bucket and two scoped workload credentials
 
 All `[local]`, with your admin login. **Nothing here touches `k3-master`.**
 
@@ -268,16 +268,24 @@ cat > /tmp/k3-dr-lifecycle.json <<'EOF'
     { "ID": "k3s-daily-8d",  "Status": "Enabled",
       "Filter": { "Prefix": "k3s/daily/" },
       "Expiration": { "Days": 8 },
-      "NoncurrentVersionExpiration": { "NoncurrentDays": 2 } },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 31 } },
 
     { "ID": "k3s-weekly-31d", "Status": "Enabled",
       "Filter": { "Prefix": "k3s/weekly/" },
       "Expiration": { "Days": 31 },
-      "NoncurrentVersionExpiration": { "NoncurrentDays": 2 } },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 31 } },
 
     { "ID": "preflight-tests-2d", "Status": "Enabled",
       "Filter": { "Prefix": "_preflight/" },
       "Expiration": { "Days": 2 } },
+
+    { "ID": "velero-noncurrent-35d", "Status": "Enabled",
+      "Filter": { "Prefix": "velero/" },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 35 } },
+
+    { "ID": "k3s-release-noncurrent-365d", "Status": "Enabled",
+      "Filter": { "Prefix": "k3s-release/" },
+      "NoncurrentVersionExpiration": { "NoncurrentDays": 365 } },
 
     { "ID": "abort-stuck-uploads", "Status": "Enabled",
       "Filter": { "Prefix": "" },
@@ -291,16 +299,16 @@ aws s3api put-bucket-lifecycle-configuration \
 rm -f /tmp/k3-dr-lifecycle.json
 ```
 
-> ### 🚨 There is deliberately **no rule for `velero/` and none for `k3s-release/`**
+> ### 🚨 There is no **current-version expiry** for `velero/` or `k3s-release/`
 >
 > Velero's file-system backups live in a Kopia repository whose objects reference each other, and
 > Velero expires them itself using each Schedule's `ttl`. An S3 expiry rule would delete chunks a
 > still-valid backup depends on, and the corruption only shows up when you try to restore. If you
-> want a safety net there, use a *noncurrent* version expiry only.
+> The rules above expire only noncurrent S3 versions. They never remove a current Kopia object.
 >
 > `k3s-release/` holds the K3s binaries a future restore needs. It must never expire.
 
-### 2.5 — Create the one credential the server gets
+### 2.5 — Create separate Job 1 and Velero credentials
 
 ```bash
 aws iam create-user --user-name k3-master-backup-writer
@@ -310,10 +318,21 @@ cat > /tmp/k3-dr-writer-policy.json <<EOF
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "ListOwnBucketOnly",
+      "Sid": "ResolveBucketRegion",
       "Effect": "Allow",
-      "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+      "Action": "s3:GetBucketLocation",
       "Resource": "arn:aws:s3:::$BUCKET"
+    },
+    {
+      "Sid": "ListOnlyItsOwnPrefixes",
+      "Effect": "Allow",
+      "Action": "s3:ListBucket",
+      "Resource": "arn:aws:s3:::$BUCKET",
+      "Condition": {
+        "StringLike": {
+          "s3:prefix": ["k3s/*", "k3s-release/*", "_preflight/*"]
+        }
+      }
     },
     {
       "Sid": "WriteOnlyForK3sBackups",
@@ -324,12 +343,6 @@ cat > /tmp/k3-dr-writer-policy.json <<EOF
         "arn:aws:s3:::$BUCKET/k3s-release/*",
         "arn:aws:s3:::$BUCKET/_preflight/*"
       ]
-    },
-    {
-      "Sid": "VeleroOwnsItsOwnPrefix",
-      "Effect": "Allow",
-      "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
-      "Resource": "arn:aws:s3:::$BUCKET/velero/*"
     }
   ]
 }
@@ -339,6 +352,34 @@ aws iam put-user-policy --user-name k3-master-backup-writer \
   --policy-name k3-master-dr-write --policy-document file:///tmp/k3-dr-writer-policy.json
 
 aws iam create-access-key --user-name k3-master-backup-writer \
+  --query 'AccessKey.{Id:AccessKeyId,Secret:SecretAccessKey}' --output table
+
+aws iam create-user --user-name k3-master-velero
+
+cat > /tmp/k3-dr-velero-policy.json <<EOF
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ListBucketForVelero",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket", "s3:GetBucketLocation"],
+      "Resource": "arn:aws:s3:::$BUCKET"
+    },
+    {
+      "Sid": "VeleroOwnsOnlyItsPrefix",
+      "Effect": "Allow",
+      "Action": ["s3:PutObject", "s3:GetObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
+      "Resource": "arn:aws:s3:::$BUCKET/velero/*"
+    }
+  ]
+}
+EOF
+
+aws iam put-user-policy --user-name k3-master-velero \
+  --policy-name k3-master-dr-velero --policy-document file:///tmp/k3-dr-velero-policy.json
+
+aws iam create-access-key --user-name k3-master-velero \
   --query 'AccessKey.{Id:AccessKeyId,Secret:SecretAccessKey}' --output table
 
 rm -f /tmp/k3-dr-*.json
@@ -351,13 +392,24 @@ Read the *gaps* in that policy, because they're the design:
   uploads by *listing* them and comparing sizes.
 - **No `DeleteObject` on `k3s/*`.** Old backups expire via the lifecycle rules in 2.4, never via
   anything on the server.
-- **`velero/*` gets full control on purpose.** Velero expires its own backups using `ttl` — TTL
-  expiry *is* Velero issuing deletes. Remove it and nothing under `velero/` ever expires, the "7
-  daily + 4 weekly" retention becomes fiction, and failed backups leave partial data behind.
+- **The Job 1 key cannot access `velero/*`.** Compromising `backup.env` does not expose the readable
+  Kopia repository.
+- **Only the Velero key gets full control of `velero/*`.** Velero expires backups using `ttl` — TTL
+  expiry *is* Velero issuing deletes. Remove it and nothing under `velero/` ever expires, TTL-based
+  retention becomes fiction, and failed backups leave partial data behind.
   **Do not "harden" this away.**
+- **Listing is scoped for Job 1 and bucket-wide for Velero.** Job 1 always lists a known prefix, so
+  its `s3:ListBucket` carries an `s3:prefix` condition. Velero and Kopia list keys under their own
+  prefix using patterns that are not a documented contract, so the same condition there risks
+  breaking backup or expiry after a Velero upgrade — for a credential that can already read every
+  byte under `velero/`. What the Velero key therefore *can* do is enumerate key names elsewhere in
+  the bucket. It still cannot read, write or delete a single object outside `velero/`. If key-name
+  enumeration matters to you, put Velero's data in its own bucket rather than adding an untested
+  prefix condition.
 
-Save the access key ID and secret somewhere safe right now — the secret is shown once. They go into
-`/etc/k3s-backup/backup.env` in stage 3 and nowhere else. **Never commit them to this repo.**
+Save both access-key pairs now — each secret is shown once. The Job 1 pair goes into
+`/etc/k3s-backup/backup.env`; the Velero pair is used only to create the Kubernetes Secret in stage
+4. **Never commit either pair to this repo.**
 
 > **There is deliberately no second, restore-only credential.** Restores use your normal AWS admin
 > or SSO login. The previous design kept a permanent reader key in a vault on a 90-day rotation,
@@ -376,10 +428,11 @@ aws s3api get-bucket-encryption  --bucket "$BUCKET"
 aws s3api get-bucket-lifecycle-configuration --bucket "$BUCKET" \
   --query 'Rules[].{ID:ID,Prefix:Filter.Prefix,Days:Expiration.Days}' --output table
 aws iam list-user-policies --user-name k3-master-backup-writer
+aws iam list-user-policies --user-name k3-master-velero
 ```
 
-Expect: four `true`s, versioning `Enabled`, encryption `AES256`, four lifecycle rules with **none**
-on `velero/` or `k3s-release/`, and one inline policy on the user.
+Expect: four `true`s, versioning `Enabled`, encryption `AES256`, six lifecycle rules, no
+current-version expiry on `velero/` or `k3s-release/`, and one inline policy on each user.
 
 **This is the only place bucket settings get verified.** The on-node preflight deliberately doesn't
 check them — that credential can't read bucket configuration, and it shouldn't be able to.
@@ -401,7 +454,7 @@ S3_BUCKET=k3-master-dr
 AWS_REGION=<your-region>
 AWS_ACCESS_KEY_ID=<from stage 2.5>
 AWS_SECRET_ACCESS_KEY=<from stage 2.5>
-# The only alert that still works when this server is dead. See 02 §7.
+# Job 1's external dead-man signal. Velero uses a separate URL. See 02 §7.
 HEARTBEAT_URL=
 ```
 
@@ -415,7 +468,7 @@ sudo stat -c '%a %U:%G %n' /etc/k3s-backup /etc/k3s-backup/backup.env
 immediately — this file holds write access to the bucket containing the cluster CA.
 
 > `HEARTBEAT_URL` can stay empty for now; the script warns on every run until it's set. Filling it
-> in is [gap 2](05-gaps-and-open-questions.md#2-the-heartbeat-has-nowhere-to-report-to-yet) and
+> in is [gap 2](05-gaps-and-open-questions.md#2-the-external-heartbeats-have-nowhere-to-report-yet) and
 > takes about five minutes once the channel is decided.
 
 ### 3.2 — Install the script and units `[node]`
@@ -468,7 +521,7 @@ sudo ls -lah /var/backups/k3s/*/
 
 **Check:** the script should print `snapshot ok (read-only), integrity_check=ok`, then
 `manifest: k3s=v1.34.5+k3s1 …`, then an archive size around 20 MB. In the staging folder you should
-see three things — the `.tar.gz`, its `.sha256`, and `MANIFEST.json`.
+see four things — the `.tar.gz`, its `.sha256`, `MANIFEST.json`, and `COMPLETE.json`.
 
 Look inside without extracting anything:
 
@@ -514,17 +567,19 @@ sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/" --recursiv
 ```
 
 ```text
-k3s/daily/2026-09-02/MANIFEST.json
-k3s/daily/2026-09-02/k3s-2026-09-02.tar.gz
-k3s/daily/2026-09-02/k3s-2026-09-02.tar.gz.sha256
+k3s/daily/2026-09-02T021500Z/COMPLETE.json
+k3s/daily/2026-09-02T021500Z/MANIFEST.json
+k3s/daily/2026-09-02T021500Z/k3s-2026-09-02T021500Z.tar.gz
+k3s/daily/2026-09-02T021500Z/k3s-2026-09-02T021500Z.tar.gz.sha256
 k3s-release/v1.34.5+k3s1/RESTORE.txt
 k3s-release/v1.34.5+k3s1/k3s
+k3s-release/v1.34.5+k3s1/k3s.sha256
 ```
 
 **That folder is one complete restore set.** The `k3s-release/` upload happens once per version —
 tomorrow's run won't repeat it.
 
-If today is Sunday you'll also see the same three objects under `k3s/weekly/`. That's the retention
+If today is Sunday you'll also see the same four objects under `k3s/weekly/`. That's the retention
 design, not a bug: two prefixes so two lifecycle rules can express 7 daily + 4 weekly.
 
 You *won't* see `velero/` yet — that's stage 4, and until it exists no PVC data and no single
@@ -549,14 +604,38 @@ is exactly what a real restore will use.
 
 ```bash
 mkdir -p ~/k3-restore-check && cd ~/k3-restore-check
-DATE=$(aws s3 ls "s3://$BUCKET/k3s/daily/" | awk '{print $2}' | tr -d '/' | sort | tail -1)
-aws s3 cp "s3://$BUCKET/k3s/daily/$DATE/" . --recursive
-sha256sum -c ./*.sha256
+RUN_ID=$(aws s3api list-objects-v2 --bucket "$BUCKET" --prefix k3s/daily/ \
+  --query "Contents[?ends_with(Key, 'COMPLETE.json')].Key" --output text |
+  tr '\t' '\n' | awk -F/ '{print $3}' | sort | tail -1)
+[ -n "$RUN_ID" ] || { echo "no complete restore set found" >&2; exit 1; }
+aws s3 cp "s3://$BUCKET/k3s/daily/$RUN_ID/" . --recursive
+python3 - <<'PY'
+import hashlib, json
+
+def digest(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+# COMPLETE.json (written last) vouches for MANIFEST.json, which vouches for the
+# archive. Verifying that chain is the point; the sidecar .sha256 is a copy
+# nothing else attests to.
+marker = json.load(open("COMPLETE.json"))
+actual = hashlib.sha256(open("MANIFEST.json", "rb").read()).hexdigest()
+assert actual == marker["manifest_sha256"], f"manifest mismatch: {actual}"
+
+archive = json.load(open("MANIFEST.json"))["archive"]
+actual = digest(archive["filename"])
+assert actual == archive["sha256"], f"archive mismatch: {actual}"
+print(f"chain verified: COMPLETE.json -> MANIFEST.json -> {archive['filename']}")
+PY
 ```
 
-That one `sha256sum -c` verifies the whole backup, and it's the same command
+That chain check is exactly what
 [restore step 1](03-restore-runbook.md#step-1--pick-a-backup-and-read-its-manifest) tells you to run
-during an outage.
+during an outage — practise it here, while nothing is on fire.
 
 ```bash
 tar -xzf k3s-*.tar.gz
@@ -607,9 +686,8 @@ sudo systemctl enable --now k3s-backup.timer
 systemctl list-timers 'k3s-backup*' --all --no-pager
 ```
 
-**Check:** next run at 02:15 UTC — 45 minutes ahead of the Velero schedule, so the SQLite reader
-and Velero's node-agent are never on the disk together. The script also takes a lock, so a slow run
-can never overlap the next one.
+**Check:** next run at 02:15 UTC. Its 30-minute systemd timeout plus 10-minute random delay ends
+before the 03:30 UTC Velero window. The script also takes a lock, so two Job 1 runs cannot overlap.
 
 ---
 
@@ -633,15 +711,25 @@ Write down what you find. You'll compare the node-agent's hostPath against it in
 
 ### 4.2 — Install Velero `[local]`
 
+Install **Velero CLI v1.18.0** and verify that this machine reaches the production cluster first:
+
+```bash
+velero version --client-only       # v1.18.0
+kubectl get nodes                  # k3-master Ready
+```
+
+The installer pins AWS plugin `v1.14.1`, the compatible plugin series for Velero `v1.18.x`.
+
 ```bash
 cat > ./velero-credentials <<'EOF'
 [default]
-aws_access_key_id=<the writer key from 2.5>
-aws_secret_access_key=<the writer secret>
+aws_access_key_id=<the dedicated Velero key from 2.5>
+aws_secret_access_key=<the dedicated Velero secret>
 EOF
 chmod 600 ./velero-credentials
 
 export S3_BUCKET="$BUCKET" AWS_REGION="$REGION" CREDS_FILE=./velero-credentials
+export KUBELET_ROOT_DIR=/var/lib/kubelet   # replace with the verified 4.1 value
 ./scripts/velero/install-velero.sh
 
 shred -u ./velero-credentials
@@ -675,8 +763,8 @@ Also confirm, while you're here:
 - Cluster-scoped resources are in the backup (CRDs, ClusterRoles, StorageClass).
 - The `argocd` namespace backup contains its Secrets and Applications — that's what retires the
   separate ArgoCD export for good.
-- One small restore into a scratch namespace actually works — see
-  [03 §B](03-restore-runbook.md#b--restoring-one-pvc-or-one-object).
+- One narrow object restore works. Exercise PVC recovery only with §B's controller-aware procedure;
+  a scratch namespace by itself cannot prove cross-namespace volume copy-back.
 - After a week, that old backups really do expire — proof the `velero/` delete permission is right.
 
 ---
@@ -689,34 +777,59 @@ Design and thresholds are in [02 §7](02-backup-strategy.md#7-knowing-it-works).
 
 | # | Alert | Status |
 |---|-------|--------|
-| 1 | No Job 1 backup arrived in 26 h — **off-server heartbeat** | ⏳ channel undecided ([gap 2](05-gaps-and-open-questions.md#2-the-heartbeat-has-nowhere-to-report-to-yet)) |
-| 2 | Velero's last backup isn't `Completed` — `velero_backup_last_successful_timestamp`, in-cluster | to do |
-| 3 | **Fewer pod volumes in the last backup than the cluster has PVCs** — in-cluster | to do |
+| 1 | No Job 1 backup arrived in 26 h — **off-server heartbeat** | ⏳ channel undecided ([gap 2](05-gaps-and-open-questions.md#2-the-external-heartbeats-have-nowhere-to-report-yet)) |
+| 2 | No verified Velero backup/PVB heartbeat in 30 h — **off-server** | script and timer included; endpoint to do |
+| 3 | A scheduled Backup or any of its PodVolumeBackups is not `Completed` | enforced by the same external check |
 | 4 | Root disk free under 10% — in-cluster | to do |
 
-Alert 3 is not a duplicate of alert 2. A Velero backup that captured **zero** volumes still finishes
-`Completed`, so alert 2 stays green through the exact failure
-[gap 6](05-gaps-and-open-questions.md) describes. Count the volumes, not the status:
+Install the supplied verifier on the node. It selects the newest `daily` or `weekly` scheduled
+backup by creation timestamp, requires it to be fresh and `Completed`, requires at least the
+configured number of completed `PodVolumeBackups`, requires it to be a backup it has not already
+reported, and only then pings the second dead-man URL:
 
 ```bash
-LAST=$(velero backup get -o name | head -1 | cut -d/ -f2)
-kubectl -n velero get podvolumebackups -l velero.io/backup-name="$LAST" \
-  --field-selector status.phase=Completed --no-headers | wc -l
-kubectl get pvc -A --no-headers | wc -l        # the two numbers must match
+# [local]
+scp scripts/velero/check-last-backup.sh \
+  scripts/systemd/velero-backup-check.service \
+  scripts/systemd/velero-backup-check.timer <user>@45.90.98.51:/tmp/
+
+# [node]
+sudo install -m 0750 /tmp/check-last-backup.sh /usr/local/sbin/check-last-velero-backup.sh
+sudo install -m 0644 /tmp/velero-backup-check.service \
+  /tmp/velero-backup-check.timer /etc/systemd/system/
+sudo install -m 0600 /dev/null /etc/k3s-backup/velero-monitor.env
+sudo tee /etc/k3s-backup/velero-monitor.env >/dev/null <<'EOF'
+VELERO_HEARTBEAT_URL=https://...
+MIN_EXPECTED_PVBS=6
+MAX_AGE_HOURS=30
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now velero-backup-check.timer
+sudo systemctl start velero-backup-check.service
 ```
 
-Once the heartbeat channel is chosen, it's one line:
+Set `MIN_EXPECTED_PVBS` from the verified backup in 4.3, not from raw PVC count. Update it whenever
+the mounted volume topology changes.
+
+The verifier keeps the UID of the last backup it reported in `/var/lib/k3s-backup/velero-last-reported`
+and will not ping twice for the same backup, so a skipped schedule stops the heartbeat even while
+yesterday's backup is still inside `MAX_AGE_HOURS`. Two consequences worth knowing before you go
+live: the first run after install pings immediately, and deleting that state file causes one extra
+ping for a backup already reported. Never "fix" a firing alert by removing it.
+
+Configure a **separate dead-man check URL** for Job 1 and Velero. Sharing one URL lets either job
+hide the failure of the other.
 
 ```bash
 sudo sed -i 's|^HEARTBEAT_URL=.*|HEARTBEAT_URL=https://...|' /etc/k3s-backup/backup.env
 sudo systemctl start k3s-backup.service     # confirm "heartbeat sent" in the log
 ```
 
-**Test each alert by deliberately breaking it.** An untested alert is a decoration. Stop the timer
-for a day, or point `HEARTBEAT_URL` at a dead endpoint, and confirm someone is actually told.
+**Test each alert by deliberately breaking it.** An untested alert is a decoration. Pause each
+timer/check separately and confirm the corresponding external check alerts.
 
-Remember why alert 1 is the one that matters: alerts 2, 3 and 4 run inside the cluster we're
-protecting, so they die with the server.
+Both backup-success alerts terminate outside the cluster, so server loss also becomes a missed
+heartbeat rather than taking the alerting system down silently.
 
 ### 5.2 — Watch the first few runs `[node]`
 
@@ -724,7 +837,7 @@ Takes about 30 seconds a day, for two or three days — not a week, because the 
 monitoring plan, not you.
 
 ```bash
-systemctl list-timers 'k3s-backup*' --no-pager
+systemctl list-timers 'k3s-backup*' 'velero-backup-check*' --no-pager
 journalctl -u k3s-backup.service --since '24 hours ago' --no-pager | tail -30
 df -h /
 
@@ -753,10 +866,11 @@ Nothing in stages 1–3 modifies K3s, so undoing means "remove what we added."
 
 | Stage | How to undo |
 |-------|-------------|
+| 5.1 | Disable `velero-backup-check.timer`, remove its service/timer/script and `velero-monitor.env`, then `daemon-reload` |
 | 3.8 | `sudo systemctl disable --now k3s-backup.timer`, `sudo rm /etc/systemd/system/k3s-backup.*`, `daemon-reload` |
 | 3.2–3.6 | `sudo rm -f /usr/local/sbin/k3s-server-backup.sh; sudo rm -rf /var/backups/k3s` |
-| 3.1 | `sudo rm -rf /etc/k3s-backup`, then `aws iam delete-access-key --user-name k3-master-backup-writer --access-key-id <id>` |
-| 2 | `aws s3 rm s3://$BUCKET --recursive`, `aws s3api delete-bucket --bucket $BUCKET`, `aws iam delete-user-policy …` then `delete-user` |
+| 3.1 | `sudo rm -rf /etc/k3s-backup`, then delete the Job 1 access key |
+| 2 | Empty all object versions/delete markers, delete the bucket, then delete both inline policies, access keys and IAM users (`k3-master-backup-writer`, `k3-master-velero`) |
 | 1 | Nothing — read-only throughout |
 
 **If a backup run ever seems to be affecting the server** (unlikely — it runs at low I/O priority

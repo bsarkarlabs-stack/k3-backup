@@ -1,0 +1,18 @@
+[Unit]
+Description=Verify latest Velero backup and send external heartbeat
+After=k3s.service network-online.target
+Requires=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/k3s-backup/velero-monitor.env
+ExecStart=/usr/local/sbin/check-last-velero-backup.sh
+# Holds the UID of the last backup reported, so a skipped schedule cannot be
+# masked by re-reporting yesterday's still-fresh backup.
+StateDirectory=k3s-backup
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+TimeoutStartSec=300
+

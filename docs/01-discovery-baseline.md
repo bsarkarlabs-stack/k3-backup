@@ -28,7 +28,8 @@ these facts live in [02 — Backup Strategy](02-backup-strategy.md), not here.
 | `45.90.98.51` | The main public address — how the internet reaches this server |
 | `10.10.10.103` | An internal/private address |
 | `172.17.0.1` | Docker's internal networking |
-| `10.42.1.0`, `10.42.1.1` | Used internally by K3s for pod networking |
+| `10.42.1.0/24` | K3s pod CIDR observed on this node (network, not a host address) |
+| `10.42.1.1` | Gateway/interface address inside that pod network |
 
 ---
 

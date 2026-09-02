@@ -9,12 +9,12 @@ could still make that design wrong on this particular server.
 | # | Gap | Serious? | Blocks | Issue |
 |---|-----|----------|--------|-------|
 | 1 | RPO and RTO are not signed off | **Blocking** | Knowing whether "daily" is the right answer | [#3](../../../issues/3) |
-| 2 | The heartbeat has nowhere to report to yet | **Blocking** | A failed backup being noticed at all | [#2](../../../issues/2) |
+| 2 | The two external heartbeats have nowhere to report yet | **Blocking** | Job 1 or Velero failure being noticed | [#2](../../../issues/2) |
 | 3 | Nothing has ever been restored | **Blocking** | Knowing any of this works | [#12](../../../issues/12) |
 | 4 | Where Traefik's HTTPS certificates come from | **Blocking** | A clean restore — silently | [#4](../../../issues/4) |
 | 5 | Who can actually perform a restore | High | The whole plan, if one person has the AWS access | [#16](../../../issues/16) |
 | 6 | Whether Velero's node-agent can read our volumes | High | All PVC and single-object restores | [#11](../../../issues/11) |
-| 7 | Crash-consistency of the Prometheus / Loki / MinIO volumes | Medium | Trusting a PVC restore | [#12](../../../issues/12) |
+| 7 | Application consistency of live Prometheus / Loki / MinIO files | Medium | Trusting monitoring history | [#12](../../../issues/12) |
 | 8 | Is K3s encrypting Secrets inside its own database? | Medium | How loudly the runbook flags `cred/` | [#22](../../../issues/22) |
 | 9 | One region, one bucket, no backup-of-the-backup | Low | A whole-region outage | [#15](../../../issues/15) |
 
@@ -36,10 +36,11 @@ not a default nobody examined.
 
 ---
 
-## 2. The heartbeat has nowhere to report to yet
+## 2. The external heartbeats have nowhere to report yet
 
-**Blocking.** The backup script pings `HEARTBEAT_URL` after it has verified its objects landed in
-S3. Nothing is listening yet, so today a silently stopped backup stays silent.
+**Blocking.** Job 1 pings `HEARTBEAT_URL` after its committed set lands. The separate Velero
+verifier pings `VELERO_HEARTBEAT_URL` only after a fresh scheduled Backup and its
+PodVolumeBackups pass. Nothing is listening yet, so stopped backups remain silent.
 
 This is the **only** alert that still works when `k3-master` is dead, which is the failure that
 matters most. Prometheus and Alertmanager run inside the cluster we're protecting; they go down with
@@ -53,13 +54,13 @@ Three realistic channels:
 | AWS-native: EventBridge rule on S3 `ObjectCreated` under `k3s/daily/` → CloudWatch alarm treating missing data as breaching | ~1 hour | No third party. More moving parts, and it watches the bucket rather than the script |
 | An Alertmanager or push gateway hosted **outside** this cluster | varies | Only worth it if one already exists |
 
-**To close:** pick one, set `HEARTBEAT_URL`, and prove it fires by stopping the timer for a day.
+**To close:** create two checks, set both URLs, and prove each fires when only its own timer stops.
 
 ---
 
 ## 3. Nothing has ever been restored
 
-**Blocking.** All three flows in the [restore runbook](03-restore-runbook.md) are written but
+**Blocking.** All four flows in the [restore runbook](03-restore-runbook.md) are written but
 unproven, and the ~2 hour RTO in it is a guess.
 
 *A backup that has never been restored is a hope, not a plan.*
@@ -101,8 +102,7 @@ confirmed it isn't.
 - Name **at least two people** who can log into AWS and read `s3://k3-master-dr`.
 - Write the **bucket name and region** somewhere that survives losing AWS access to that account —
   this repo counts, and it already says both.
-- Note who rotates the one backup-writer key, and how often. There's only one key now, so this is a
-  much smaller chore than before.
+- Name the owner and rotation interval for both workload keys (Job 1 and Velero).
 
 ---
 
@@ -126,8 +126,8 @@ marked `Completed`.
 velero backup describe <name> --details      # all six PVCs must appear under "Pod Volume Backups"
 ```
 
-An empty *Pod Volume Backups* section is the failure. Then prove it the other way, by restoring one
-PVC into a scratch namespace.
+An empty *Pod Volume Backups* section is the failure. Then prove it the other way with the
+controller-aware PVC procedure in restore runbook §B.
 
 **Then make it permanent:** this exact failure is why
 [02 §7 alert 3](02-backup-strategy.md#7-knowing-it-works) alerts on the *number of pod volumes* in
@@ -136,17 +136,18 @@ is what notices the day a K3s upgrade moves the kubelet root.
 
 ---
 
-## 7. Crash-consistency of the monitoring volumes
+## 7. Application consistency of the monitoring volumes
 
-File-system backup of a **running** database is crash-consistent, not application-consistent —
-equivalent to pulling the power cord.
+File-system backup scans a **running** filesystem over time. It is neither application-consistent
+nor a point-in-time crash-consistent block snapshot; different files can represent different
+moments.
 
 - **Prometheus** normally replays its WAL and recovers cleanly.
 - **MinIO** and **Loki's boltdb-shipper** are less forgiving.
 
-**To close:** during the restore test, confirm each restored pod reaches Ready *and* returns
-pre-incident data. Only if that fails do we add a Velero pre-backup hook to flush the store —
-adding one pre-emptively is complexity bought on speculation.
+**To close:** decide whether monitoring history is explicitly best-effort. If it is required data,
+add and test an application-native export or quiesce hook; a successful live FSB restore alone
+does not establish consistency.
 
 ---
 
@@ -190,8 +191,8 @@ here so the reasoning isn't lost.
 | **The exact K3s release might not be downloadable years later** | The binary is uploaded once per version to `k3s-release/<version>/`, never expired, with a `RESTORE.txt` ([02 §8](02-backup-strategy.md#8-future-proofing-a-restore)) |
 | **A customer-managed KMS key, its alias, rotation, four IAM actions, a key-ARN bucket policy, and a 64 MB test upload to catch the non-obvious `kms:Decrypt` requirement** | **Removed.** SSE-S3 by default, plus a credential with no read access to `k3s/*` — simpler *and* a tighter blast radius ([#14](../../../issues/14), [#21](../../../issues/21), [#24](../../../issues/24)) |
 | **A second permanent restore-reader key on a 90-day rotation** | **Removed.** Restores use an admin/SSO login. What replaced it is gap 5 above: two named people, written down |
-| **The server could read every backup it ever wrote** | No `s3:GetObject` outside `velero/*`. Uploads are verified by listing instead |
-| **Four artifacts and four checksums per run** | One archive, one checksum, one manifest. They were only ever restored together ([#23](../../../issues/23)) |
+| **One credential exposed both Job 1 and the readable/deletable Kopia repository** | Separate Job 1 and Velero identities; Job 1 cannot access `velero/*` |
+| **Four artifacts and four checksums per run** | One archive, one checksum, one manifest, and one completion marker uploaded last ([#23](../../../issues/23)) |
 | **Alerting was built on a node-exporter textfile metric nobody had confirmed was read** | **Removed.** Replaced by a heartbeat pinged after the objects are verified in S3 — which also works when the server is dead (gap 2) |
 | **"Check it by hand every day for a week" was the monitoring plan** | Watch two or three runs, then rely on the alerts |
 | **Two parallel runbooks (a 4,100-line day-by-day and a 1,300-line stage-by-stage) describing the same setup** | One: [07 — Setup](07-setup.md) |

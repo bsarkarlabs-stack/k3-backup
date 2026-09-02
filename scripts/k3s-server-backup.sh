@@ -12,10 +12,11 @@
 #
 # One run produces one archive and two small companion files:
 #
-#   s3://$S3_BUCKET/k3s/daily/YYYY-MM-DD/
-#     k3s-YYYY-MM-DD.tar.gz          the whole backup, one file
-#     k3s-YYYY-MM-DD.tar.gz.sha256   verify before you trust it
+#   s3://$S3_BUCKET/k3s/daily/YYYY-MM-DDTHHMMSSZ/
+#     k3s-YYYY-MM-DDTHHMMSSZ.tar.gz          the whole backup, one file
+#     k3s-YYYY-MM-DDTHHMMSSZ.tar.gz.sha256   verify before you trust it
 #     MANIFEST.json                  which K3s version to install, read this first
+#     COMPLETE.json                  uploaded last; ignore a set without it
 #
 # MANIFEST.json is also inside the archive. It is uploaded separately as well
 # so a restore can learn the K3s version without downloading the archive.
@@ -33,8 +34,8 @@
 #   ./host-facts/...    plain text. Reference material for rebuilding the host.
 #                       Never extracted onto / — read it, apply what applies.
 #
-# On Sundays the same three files are uploaded a second time under
-# k3s/weekly/YYYY-MM-DD/. That second prefix is the entire retention design: an
+# On Sundays the same four files are uploaded a second time under
+# k3s/weekly/<run-id>/. That second prefix is the entire retention design: an
 # S3 lifecycle rule can only say "expire N days after creation", so 7 daily +
 # 4 weekly needs exactly two prefixes and two rules.
 #
@@ -128,13 +129,15 @@ FREE_MB=$(df -Pm "$DF_TARGET" | awk 'NR==2{print $4}')
 
 RUN_TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 RUN_DATE=${RUN_TS%%T*}
-STAGE="$STAGE_ROOT/$RUN_DATE"
+RUN_ID=$(printf '%s' "$RUN_TS" | tr -d ':')
+STAGE="$STAGE_ROOT/$RUN_ID"
 PAYLOAD="$STAGE/payload"
-ARCHIVE="$STAGE/k3s-$RUN_DATE.tar.gz"
+ARCHIVE="$STAGE/k3s-$RUN_ID.tar.gz"
 MANIFEST="$STAGE/MANIFEST.json"
+COMPLETE="$STAGE/COMPLETE.json"
 
 TIERS=(daily)
-if [ "$(date -u +%u)" = "7" ] || [ "${FORCE_TIER:-}" = "weekly" ]; then
+if [ "$(date -u -d "$RUN_TS" +%u)" = "7" ] || [ "${FORCE_TIER:-}" = "weekly" ]; then
   TIERS+=(weekly)
 fi
 
@@ -162,6 +165,18 @@ run_tar() {
   tar "$@" || rc=$?
   [ "$rc" -le 1 ] || return "$rc"
   return 0
+}
+
+# Detect a token/certificate/credential rotation while this run is taking its
+# SQLite snapshot and staging the matching cluster identity. A mixed set may
+# be individually readable but fail as a cluster during restore.
+identity_fingerprint() {
+  find "$K3S_SERVER_DIR/token" "$K3S_SERVER_DIR/tls" "$K3S_SERVER_DIR/cred" \
+    -xdev \( -type f -o -type l \) -print0 \
+    | sort -z \
+    | xargs -0 sha256sum \
+    | sha256sum \
+    | awk '{print $1}'
 }
 
 # The k3s systemd unit spreads ExecStart over continuation lines, so this
@@ -345,20 +360,23 @@ backup_host_facts() {
 write_manifest() {
   log "4/4  manifest -> MANIFEST.json"
 
-  local k3s_version="unknown" k3s_raw=""
+  local k3s_version="unknown" k3s_raw="" k3s_binary_sha256="unknown"
   if [ -x "$K3S_BIN" ]; then
     k3s_raw=$("$K3S_BIN" --version 2>/dev/null | tr '\n' ';' || true)
     k3s_version=$(printf '%s\n' "$k3s_raw" | sed -n 's/.*k3s version \([^ ;]*\).*/\1/p')
     [ -n "$k3s_version" ] || k3s_version="unknown"
+    k3s_binary_sha256=$(sha256sum "$K3S_BIN" | awk '{print $1}')
   fi
   [ "$k3s_version" = "unknown" ] \
     && warn "could not determine the k3s version — a restore would have to guess"
 
   MANIFEST_RUN_TS="$RUN_TS" \
+  MANIFEST_RUN_ID="$RUN_ID" \
   MANIFEST_DATE="$RUN_DATE" \
   MANIFEST_TIERS="${TIERS[*]}" \
   MANIFEST_K3S_VERSION="$k3s_version" \
   MANIFEST_K3S_RAW="$k3s_raw" \
+  MANIFEST_K3S_BINARY_SHA256="$k3s_binary_sha256" \
   MANIFEST_K3S_START="$(k3s_start_command)" \
   MANIFEST_BUCKET="$S3_BUCKET" \
   MANIFEST_ARCHIVE="$(basename "$ARCHIVE")" \
@@ -377,7 +395,8 @@ except OSError:
 
 date = os.environ["MANIFEST_DATE"]
 doc = {
-    "schema": "k3s-server-backup/manifest/v3",
+    "schema": "k3s-server-backup/manifest/v4",
+    "run_id": os.environ["MANIFEST_RUN_ID"],
     "run_timestamp": os.environ["MANIFEST_RUN_TS"],
     "hostname": socket.gethostname(),
     "os_release": os_release,
@@ -391,8 +410,9 @@ doc = {
     # silently produces a *different* cluster.
     "k3s_start_command": os.environ.get("MANIFEST_K3S_START", ""),
     "k3s_binary_in_bucket": "k3s-release/%s/k3s" % os.environ["MANIFEST_K3S_VERSION"],
+    "k3s_binary_sha256": os.environ["MANIFEST_K3S_BINARY_SHA256"],
     "s3_bucket": os.environ["MANIFEST_BUCKET"],
-    "s3_prefixes": [f"k3s/{t}/{date}" for t in os.environ["MANIFEST_TIERS"].split()],
+    "s3_prefixes": [f"k3s/{t}/{os.environ['MANIFEST_RUN_ID']}" for t in os.environ["MANIFEST_TIERS"].split()],
     "archive": {"filename": os.environ["MANIFEST_ARCHIVE"]},
     # Kept ASCII on purpose: this file gets read by whatever tooling is to hand
     # during an outage, not necessarily in a UTF-8 locale.
@@ -410,6 +430,30 @@ with open(sys.argv[1], "w") as fh:
 
 print(f"     manifest: k3s={doc['k3s_version']} os={os_release}")
 PY
+}
+
+# COMPLETE.json is uploaded only after the archive, checksum and manifest were
+# uploaded and verified. Restore tooling must ignore any prefix without it.
+write_complete_marker() {
+  python3 - "$MANIFEST" "$COMPLETE" <<'PY'
+import hashlib, json, sys
+
+manifest, output = sys.argv[1:3]
+doc = json.load(open(manifest))
+with open(manifest, "rb") as fh:
+    manifest_sha256 = hashlib.sha256(fh.read()).hexdigest()
+marker = {
+    "schema": "k3s-server-backup/complete/v1",
+    "run_id": doc["run_id"],
+    "run_timestamp": doc["run_timestamp"],
+    "archive": doc["archive"],
+    "manifest_sha256": manifest_sha256,
+}
+with open(output, "w") as fh:
+    json.dump(marker, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+PY
+  chmod 0644 "$COMPLETE"
 }
 
 # The outer manifest is the inner one plus the archive's size and digest.
@@ -457,13 +501,18 @@ upload_all() {
 
   local tier prefix file
   for tier in "${TIERS[@]}"; do
-    prefix="k3s/$tier/$RUN_DATE"
+    prefix="k3s/$tier/$RUN_ID"
     log "upload -> s3://$S3_BUCKET/$prefix/"
     for file in "$ARCHIVE" "$ARCHIVE.sha256" "$MANIFEST"; do
       aws s3 cp "$file" "s3://$S3_BUCKET/$prefix/" --only-show-errors \
         || die "upload failed for $file"
     done
     verify_prefix "$prefix"
+    aws s3 cp "$COMPLETE" "s3://$S3_BUCKET/$prefix/COMPLETE.json" --only-show-errors \
+      || die "upload failed for $COMPLETE"
+    verify_object "$prefix/COMPLETE.json" "$COMPLETE" \
+      || die "completion marker verification failed for s3://$S3_BUCKET/$prefix/"
+    log "  complete restore set committed at s3://$S3_BUCKET/$prefix/"
   done
 }
 
@@ -483,6 +532,17 @@ verify_prefix() {
   log "  verified 3 objects in s3://$S3_BUCKET/$prefix/"
 }
 
+verify_object() {
+  local key="$1" file="$2" want got
+  want=$(stat -c %s "$file")
+  got=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$key" \
+          --query "Contents[?Key=='$key'].Size | [0]" --output text 2>/dev/null || true)
+  [ "$got" = "$want" ] || {
+    warn "verification failed: s3://$S3_BUCKET/$key is '${got:-missing}', expected $want bytes"
+    return 1
+  }
+}
+
 # --------------------------------------------------------------------------
 # The K3s binary, kept once per version
 #
@@ -500,20 +560,50 @@ vault_k3s_release() {
 
   # Nothing below this point may fail the run: the backup is already safely in
   # S3 by now, and failing here would also skip the heartbeat.
-  local ver key
+  local ver key checksum_key checksum_file
   ver=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["k3s_version"])' \
           "$MANIFEST" 2>/dev/null || true)
   [ -n "$ver" ] && [ "$ver" != "unknown" ] || return 0
   key="k3s-release/$ver/k3s"
+  checksum_key="k3s-release/$ver/k3s.sha256"
+  checksum_file="$STAGE/k3s.sha256"
+  ( cd "$(dirname "$K3S_BIN")" && sha256sum "$(basename "$K3S_BIN")" ) > "$checksum_file"
 
-  if aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$key" \
-       --query "Contents[?Key=='$key'].Size | [0]" --output text 2>/dev/null | grep -qE '^[0-9]+$'; then
+  local vaulted_size local_size
+  vaulted_size=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$key" \
+                   --query "Contents[?Key=='$key'].Size | [0]" --output text 2>/dev/null || true)
+
+  if printf '%s' "$vaulted_size" | grep -qE '^[0-9]+$'; then
+    # The binary is already vaulted. Only the checksum may be missing, from an
+    # older run or a partial upload.
+    if aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$checksum_key" \
+         --query "Contents[?Key=='$checksum_key'].Size | [0]" --output text 2>/dev/null | grep -qE '^[0-9]+$'; then
+      return 0
+    fi
+
+    # Never publish a digest of the *local* binary as the digest of an object
+    # we cannot read. Size equality is the only check this write-only
+    # credential can make; if it fails, a human must repair the pair, because a
+    # confidently wrong checksum turns a usable binary into a rejected one.
+    local_size=$(stat -c %s "$K3S_BIN")
+    if [ "$vaulted_size" != "$local_size" ]; then
+      warn "s3://$S3_BUCKET/$key is $vaulted_size bytes but the local $ver binary is $local_size;"
+      warn "  refusing to vault a checksum that may not describe it. Re-upload both objects with"
+      warn "  an admin credential, or delete $key and let the next run re-vault it."
+      return 0
+    fi
+    aws s3 cp "$checksum_file" "s3://$S3_BUCKET/$checksum_key" --only-show-errors \
+      || warn "k3s binary exists, but its checksum could not be vaulted"
     return 0
   fi
 
   log "vaulting the k3s binary for $ver (once per version)"
   aws s3 cp "$K3S_BIN" "s3://$S3_BUCKET/$key" --only-show-errors \
     || { warn "could not vault the k3s binary — the backup itself is fine"; return 0; }
+  aws s3 cp "$checksum_file" "s3://$S3_BUCKET/$checksum_key" --only-show-errors \
+    || { warn "could not vault the k3s binary checksum"; return 0; }
+  verify_object "$key" "$K3S_BIN" || return 0
+  verify_object "$checksum_key" "$checksum_file" || return 0
 
   local note="$STAGE/RESTORE.txt"
   cat > "$note" <<EOF
@@ -523,10 +613,13 @@ This is the exact binary that produced the backups under k3s/. Use it when the
 matching release is no longer downloadable from get.k3s.io.
 
   aws s3 cp s3://$S3_BUCKET/$key ./k3s
+  aws s3 cp s3://$S3_BUCKET/$checksum_key ./k3s.sha256
+  sha256sum -c k3s.sha256
   sudo install -m 0755 -o root -g root ./k3s /usr/local/bin/k3s
   for c in kubectl crictl ctr; do sudo ln -sf /usr/local/bin/k3s /usr/local/bin/\$c; done
   # then restore fs-root/etc/systemd/system/k3s.service from the backup archive
   sudo systemctl daemon-reload
+  sudo systemctl enable k3s
 
 install.sh is not required — it only writes the systemd unit, and the unit is
 in the backup archive.
@@ -560,8 +653,12 @@ ping_heartbeat() {
 # Run
 # --------------------------------------------------------------------------
 
+IDENTITY_BEFORE=$(identity_fingerprint) || die "could not fingerprint the live cluster identity"
 backup_datastore
 backup_identity
+IDENTITY_AFTER=$(identity_fingerprint) || die "could not re-check the live cluster identity"
+[ "$IDENTITY_BEFORE" = "$IDENTITY_AFTER" ] \
+  || die "token/tls/cred changed during backup — refusing to upload a mixed restore set; retry"
 
 if [ "$INCLUDE_HOST_FACTS" = "1" ]; then
   backup_host_facts
@@ -572,6 +669,7 @@ fi
 write_manifest
 build_archive
 finalize_manifest
+write_complete_marker
 upload_all
 vault_k3s_release
 ping_heartbeat

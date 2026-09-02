@@ -33,20 +33,20 @@ Exit `0` = ready, `2` = ready with warnings, `1` = don't run the backup yet.
 
 ## The whole design, in one table
 
-Two jobs. One bucket. Daily. Nothing else runs on a schedule.
+Two backup jobs, plus one host-side Velero verification timer. One bucket.
 
 | | Job 1 — K3s server backup | Job 2 — Velero |
 |---|---|---|
-| Runs | 02:15 UTC daily, systemd timer on the node | 03:00 UTC daily (+ 04:00 Sunday), inside the cluster |
+| Runs | 02:15 UTC daily, systemd timer on the node | 03:30 UTC: daily Monday–Saturday, weekly Sunday |
 | Backs up | SQLite datastore, cluster identity (`tls/` `cred/` `token` `manifests/`), K3s config and start flags, a plain-text host fact sheet | Every Kubernetes object in every namespace, **plus all PVC data** |
-| Produces | One `.tar.gz` (~20 MB) + its `.sha256` + `MANIFEST.json` | A Kopia repository Velero manages itself |
-| Restores | This server, rebuilt from bare metal | Any cluster — and it's the only thing that brings PVC data or a single deleted object back |
+| Produces | One `.tar.gz` + checksum + manifest + last-written completion marker | A Kopia repository Velero manages itself |
+| Restores | This server, rebuilt from bare metal | Objects/PVC data into a source-compatible cluster |
 | Lands in | `s3://k3-master-dr/k3s/` | `s3://k3-master-dr/velero/` |
-| Retention | S3 lifecycle: 7 daily + 4 weekly | Velero TTL: 7 daily + 4 weekly |
+| Retention | S3 lifecycle: 7 daily + 4 weekly | Velero TTL: 6 weekday (168 h) + 4 Sunday (720 h) |
 
-The bucket is private, versioned, and encrypted with **SSE-S3**. The single credential that lives on
-the server can write backups but **cannot read or delete them** — only Velero's own prefix is
-writable-and-deletable, because Velero has to expire its own backups. Restores use a normal AWS
+The bucket is private, versioned, and encrypted with **SSE-S3**. Job 1 and Velero use separate
+credentials: Job 1 cannot read/delete or access `velero/`; only the Velero credential can
+read/delete its Kopia prefix because TTL and restore require it. Restores use a normal AWS
 admin/SSO login. Full detail: [02 — Backup Strategy](docs/02-backup-strategy.md).
 
 The K3s binary is also kept in the bucket, once per version, so a restore years from now doesn't
@@ -58,7 +58,7 @@ depend on that release still being downloadable.
 |---|----------|-----------------|
 | 01 | [Discovery Baseline](docs/01-discovery-baseline.md) | Everything we checked and confirmed about the server as it is today. This is the "facts" document — nothing is guessed. |
 | 02 | [Backup Strategy](docs/02-backup-strategy.md) | The design: what the two jobs cover, what they protect against, where it goes, how long it's kept, and how we'd know it broke. |
-| 03 | [Restore Runbook](docs/03-restore-runbook.md) | Three flows — full server rebuild, restoring one PVC or object, and the scheduled restore test. |
+| 03 | [Restore Runbook](docs/03-restore-runbook.md) | Four flows — full rebuild, one-object/PVC recovery, restore testing, and clean-cluster fallback. |
 | 04 | [Implementation TODO](docs/04-implementation-todo.md) | The build plan, in five phases. Matches our GitHub Issues. |
 | 05 | [Gaps & Open Questions](docs/05-gaps-and-open-questions.md) | What we still don't know or haven't decided. Read this first if something is unclear. |
 | 06 | [Developer Access](docs/06-developer-access.md) | How a new developer gets permission to clone and push to this repo. |
@@ -70,13 +70,13 @@ depend on that release still being downloadable.
 | Task | Status |
 |------|--------|
 | Checked and wrote down everything about the server | ✅ Done |
-| Decided how backups should work | ✅ Done — two jobs, one archive, SSE-S3, one credential |
-| Wrote all three restore flows | ✅ Done (written down, **not yet tested**) |
+| Decided how backups should work | ✅ Done — two jobs, one committed archive set, SSE-S3, split credentials |
+| Wrote all four restore flows | ✅ Done (written down, **not yet tested**) |
 | Job 1 script + systemd timer | ✅ Written, ⏳ not deployed |
 | Job 2 Velero install + schedules | ✅ Written, ⏳ not installed |
-| Created the S3 bucket + the one credential | ⏳ Not done yet |
-| Auto-delete old backups (7 daily + 4 weekly) | ⏳ Not set up yet |
-| Alert us if a backup doesn't arrive | ⏳ Designed, channel not chosen yet |
+| Created the S3 bucket + two scoped credentials | ⏳ Not done yet |
+| Auto-delete old backups (a week of dailies + 4 weeklies) | ⏳ Not set up yet |
+| Alert us if either backup doesn't arrive | ✅ Verifiers written, ⏳ two external checks not configured |
 | RPO / RTO agreed | ⏳ Assumed 24 h / 2–4 h, **not signed off** |
 | Actually testing a restore | ⏳ **Never done yet** |
 
@@ -98,7 +98,7 @@ were created at different times.)
 | What we don't know | Why it blocks | Issue |
 |------|------------|-------|
 | **RPO and RTO aren't agreed.** "Daily" is only right if losing a day is acceptable | Whether the schedule is correct at all | [#3](../../issues/3) |
-| **The heartbeat has nowhere to report to.** A stopped backup is currently silent | A failure being noticed | [#2](../../issues/2) |
+| **The two heartbeats have nowhere to report.** A stopped Job 1 or Velero backup is currently silent | A failure being noticed | [#2](../../issues/2) |
 | **Where our HTTPS certificates come from.** If Traefik keeps `acme.json` in temporary storage, nothing backs it up and a restore silently comes back with broken HTTPS | A clean restore | [#4](../../issues/4) |
 | **Nothing has ever been restored** | Knowing any of this works | [#12](../../issues/12) |
 

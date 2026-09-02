@@ -3,8 +3,8 @@ Description=Daily K3s server backup at 02:15 UTC
 
 [Timer]
 Unit=k3s-backup.service
-# 45 minutes ahead of the Velero schedule, so the SQLite reader and Velero's
-# node-agent are never on the disk at the same time.
+# Its 30-minute service timeout plus this 10-minute delay finishes before the
+# 03:30 UTC Velero schedule.
 OnCalendar=*-*-* 02:15:00 UTC
 # Catch up after a reboot or a missed window.
 Persistent=true

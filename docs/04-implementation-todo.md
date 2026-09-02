@@ -40,10 +40,10 @@ Script: [`scripts/k3s-server-backup.sh`](../scripts/k3s-server-backup.sh).
 
 - [ ] Create the bucket: public access blocked, versioning on, **default SSE-S3 encryption**, one
       HTTPS-only bucket policy
-- [ ] Four lifecycle rules — `k3s/daily/` 8 days, `k3s/weekly/` 31 days, `_preflight/` 2 days, abort
-      stuck multipart uploads. **Nothing on `velero/` and nothing on `k3s-release/`**
-- [ ] Create **one** IAM user: `PutObject` on `k3s/*` + `k3s-release/*`, `ListBucket` on the bucket,
-      full control on `velero/*` only. **No `GetObject` and no `DeleteObject` outside `velero/`**
+- [ ] Six lifecycle rules — current expiry for Job 1 and preflight, noncurrent-only expiry for
+      `velero/` and `k3s-release/`, plus abort stuck multipart uploads
+- [ ] Create separate Job 1 and Velero IAM users. Job 1 has write-only access to its prefixes;
+      Velero has read/write/delete access only to `velero/*`
 - [ ] Write `/etc/k3s-backup/backup.env` (0600 root:root) with bucket, region, keys and
       `HEARTBEAT_URL`
 - [ ] Install the script and both units; re-run the preflight with AWS enabled and confirm the
@@ -52,10 +52,10 @@ Script: [`scripts/k3s-server-backup.sh`](../scripts/k3s-server-backup.sh).
       (`NRestarts` unchanged)
 - [ ] Confirm `MANIFEST.json` records a real `k3s_version` and the real `k3s_start_command`
       ([#17](../../../issues/17))
-- [ ] One real run — three objects land under `k3s/daily/YYYY-MM-DD/`, and the K3s binary lands
-      under `k3s-release/<version>/`
-- [ ] Download it from your laptop, `sha256sum -c`, extract, and confirm `state.db` passes
-      `PRAGMA integrity_check` with a non-zero `kine` row count
+- [ ] One real run — four objects including last-written `COMPLETE.json` land under a unique
+      `k3s/daily/<run-id>/`; the K3s binary and checksum land under `k3s-release/<version>/`
+- [ ] Download it from your laptop, verify the `COMPLETE.json` → `MANIFEST.json` → archive chain,
+      extract, and confirm `state.db` passes `PRAGMA integrity_check` with a non-zero `kine` row count
 - [ ] `systemctl enable --now k3s-backup.timer`, confirm with `systemctl list-timers`
 - [ ] Confirm a Sunday run also writes `k3s/weekly/`
 
@@ -67,7 +67,9 @@ This is the piece that makes PVC data and single-object restores possible at all
 this plan covers either.
 
 - [ ] Find K3s's kubelet root **before** trusting anything
-- [ ] Run [`scripts/velero/install-velero.sh`](../scripts/velero/install-velero.sh) — Velero + AWS
+- [ ] Install pinned Velero CLI `v1.18.0`; run
+      [`scripts/velero/install-velero.sh`](../scripts/velero/install-velero.sh) with AWS plugin
+      `v1.14.1` and the verified `KUBELET_ROOT_DIR` — Velero +
       plugin, node-agent on, `prefix=velero`, `--use-volume-snapshots=false`,
       `--default-volumes-to-fs-backup`
 - [ ] Apply [`schedule-daily.yaml`](../scripts/velero/schedule-daily.yaml) and
@@ -78,9 +80,8 @@ this plan covers either.
 - [ ] Confirm cluster-scoped resources are in the backup (CRDs, ClusterRoles, StorageClass)
 - [ ] Confirm the `argocd` namespace backup contains its Secrets and Applications — this is what
       retires the separate ArgoCD export ([#20](../../../issues/20), [#1](../../../issues/1))
-- [ ] One small restore into a scratch namespace. **Don't just trust a green checkmark** — and
-      restore the *workload*, not just the PVC. Velero only writes volume data when it creates the
-      pod ([03 §B](03-restore-runbook.md#one-pvcs-data))
+- [ ] One object restore plus one controller-aware PVC restore. Suspend ArgoCD and delete the
+      volume-owning controller as well as the claim; scaling it to zero is not sufficient
 - [ ] After a week, confirm old backups actually expire — proves the `velero/` delete permission is
       right
 - [ ] Pin the Velero CLI version to match `install-velero.sh` and record both it and the plugin
@@ -94,16 +95,17 @@ this plan covers either.
 Four alerts, and only four ([02 §7](02-backup-strategy.md#7-knowing-it-works)).
 
 - [ ] **Decide where the heartbeat reports to** — hosted dead-man's switch, AWS EventBridge +
-      CloudWatch, or an off-cluster Alertmanager. This is the only alert that survives the server
-      dying ([#2](../../../issues/2))
+      CloudWatch, or an off-cluster Alertmanager. Create separate checks for Job 1 and Velero;
+      both detect server loss because both pings stop ([#2](../../../issues/2))
 - [ ] Set `HEARTBEAT_URL` in `backup.env`, run the job by hand, confirm `heartbeat sent` in the log
-- [ ] Alert on `velero_backup_last_successful_timestamp` going stale (26 h)
-- [ ] **Alert on the pod-volume count in the last Velero backup dropping below the number of PVCs.**
-      A backup that captured zero volumes is still `Completed`, so the status alert above would stay
-      green through exactly the failure [gap 6](05-gaps-and-open-questions.md) predicts
+- [ ] Install the supplied Velero verifier and second external heartbeat. It must validate the
+      newest scheduled Backup, age, every PVB phase, `MIN_EXPECTED_PVBS`, and that the backup was
+      not already reported (a skipped schedule must stop the heartbeat)
 - [ ] Alert on root disk free space under 10%
 - [ ] **Test all four by deliberately breaking them.** An untested alert is a decoration. For the
-      volume-count one, scale a workload to zero and confirm the next backup trips it
+      volume-count one, scale a workload to zero and confirm the next backup trips it. For the
+      missed-run one, run the verifier twice without a new backup in between and confirm the second
+      run refuses to ping
 - [ ] Watch the first two or three runs by hand, then stop watching — the alerts are the plan
 
 ---
@@ -120,7 +122,7 @@ Four alerts, and only four ([02 §7](02-backup-strategy.md#7-knowing-it-works)).
 - [ ] Confirm restored **Prometheus answers a query over pre-incident data** — proof the volume
       restore worked, not just that the pod started
 - [ ] Confirm HTTPS comes back valid
-- [ ] Run §B once against a scratch namespace
+- [ ] Run §B's one-object path; §A already exercises the destructive PVC path
 - [ ] Record the real timings, fix the runbook to match what happened, and set the actual RTO
 - [ ] Diary the repeat for **3–6 months out**, and after any K3s upgrade
 
@@ -130,6 +132,6 @@ Four alerts, and only four ([02 §7](02-backup-strategy.md#7-knowing-it-works)).
 
 1. Both jobs run on schedule, untouched, for a week
 2. A missing or failed backup pages someone within one cycle — **including when the server is dead**
-3. Both restore flows have been run for real, and the runbook matches what actually happened
+3. Same-cluster recovery and clean-cluster fallback have both been run, and the runbook matches
 4. We know the real RTO and the business has agreed it's acceptable
 5. This documentation lives in Git, not only on the server it describes how to recover

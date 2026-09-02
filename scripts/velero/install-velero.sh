@@ -15,26 +15,33 @@
 # Encryption is the bucket's own default (SSE-S3), so nothing is passed here —
 # S3 encrypts every object on arrival. See docs/02-backup-strategy.md §3.
 #
-# Prerequisites: the same bucket job 1 uses, and a credentials file holding the
-# backup identity.
+# Prerequisites: the same bucket Job 1 uses, the dedicated Velero credentials
+# (not Job 1's key), and the kubelet root verified on the target node.
 
 set -euo pipefail
 
 : "${S3_BUCKET:?set S3_BUCKET, e.g. export S3_BUCKET=k3-master-dr}"
 : "${AWS_REGION:?set AWS_REGION, e.g. export AWS_REGION=ap-south-1}"
 : "${CREDS_FILE:?set CREDS_FILE to a file holding the AWS credentials block}"
+: "${KUBELET_ROOT_DIR:?set KUBELET_ROOT_DIR to the verified kubelet root, normally /var/lib/kubelet}"
 
 # Pin both versions. An unpinned install means the plugin and the server can
 # drift apart on the next run and fail in a way that looks like a bucket
 # problem. Check compatibility before bumping either:
 # https://github.com/vmware-tanzu/velero-plugin-for-aws#compatibility
-VELERO_PLUGIN_VERSION=${VELERO_PLUGIN_VERSION:-v1.10.0}
-VELERO_VERSION=${VELERO_VERSION:-v1.15.0}
+VELERO_PLUGIN_VERSION=${VELERO_PLUGIN_VERSION:-v1.14.1}
+VELERO_VERSION=${VELERO_VERSION:-v1.18.0}
 
 # `velero install` deploys velero/velero:<CLI version> — the server version is
 # whatever CLI happens to be on the machine running this. Pinning the plugin
 # but not the CLI is half a pin: the next engineer installs from a different
 # laptop and gets a different server. Fail loudly instead.
+command -v velero >/dev/null || {
+  echo "velero CLI not found — install $VELERO_VERSION first:" >&2
+  echo "  https://velero.io/docs/main/basic-install/" >&2
+  exit 1
+}
+
 have=$(velero version --client-only 2>/dev/null | awk '/Version:/{print $2; exit}')
 if [ "$have" != "$VELERO_VERSION" ]; then
   echo "velero CLI is '${have:-unknown}', this install is pinned to $VELERO_VERSION." >&2
@@ -42,12 +49,6 @@ if [ "$have" != "$VELERO_VERSION" ]; then
   echo "checking plugin compatibility. Do not just override it to continue." >&2
   exit 1
 fi
-
-command -v velero >/dev/null || {
-  echo "velero CLI not found — install it first:" >&2
-  echo "  https://velero.io/docs/main/basic-install/" >&2
-  exit 1
-}
 
 # CREDS_FILE must look like:
 #   [default]
@@ -63,6 +64,7 @@ velero install \
   --secret-file "$CREDS_FILE" \
   --backup-location-config "region=${AWS_REGION}" \
   --use-node-agent \
+  --kubelet-root-dir "$KUBELET_ROOT_DIR" \
   --default-volumes-to-fs-backup \
   --uploader-type kopia \
   --use-volume-snapshots=false \

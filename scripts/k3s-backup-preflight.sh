@@ -198,11 +198,14 @@ else
   fi
 
   if [ -n "$WHO" ]; then
-    if aws s3api list-objects-v2 --bucket "$S3_BUCKET" --max-items 1 >/dev/null 2>&1; then
-      pass "bucket is reachable and listable: s3://$S3_BUCKET"
+    # Lists a prefix, not the whole bucket: the Job 1 policy restricts
+    # s3:ListBucket with an s3:prefix condition, and every list this credential
+    # performs during a real backup names a k3s/ or k3s-release/ prefix.
+    if aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix k3s/ --max-items 1 >/dev/null 2>&1; then
+      pass "bucket is reachable and k3s/ is listable: s3://$S3_BUCKET"
     else
-      fail "cannot list s3://$S3_BUCKET — wrong bucket name, wrong region, or no s3:ListBucket" \
-           "aws s3api list-objects-v2 --bucket $S3_BUCKET --max-items 1
+      fail "cannot list s3://$S3_BUCKET/k3s/ — wrong bucket name, wrong region, or the s3:ListBucket condition does not cover k3s/*" \
+           "aws s3api list-objects-v2 --bucket $S3_BUCKET --prefix k3s/ --max-items 1
        # the bucket itself is created at setup — docs/07-setup.md stage 2"
     fi
 
@@ -213,7 +216,7 @@ else
 
       if aws s3 cp "$TMPD/probe.txt" "s3://$S3_BUCKET/$PROBE" \
            --only-show-errors 2>"$TMPD/err"; then
-        pass "upload works, and S3 encrypted it on arrival (bucket default SSE-S3)"
+        pass "upload works (default SSE-S3 is verified separately with the admin setup checks)"
 
         # The backup verifies its own uploads this way, so prove it works here.
         SZ=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$PROBE" \
@@ -230,38 +233,32 @@ else
        # see docs/07-setup.md stage 2"
       fi
 
-      # Guardrail 1: this credential must not be able to READ backups. The
+      # Guardrail 1: the Job 1 credential must not be able to READ backups. The
       # archive holds the cluster CA and every Secret, so a compromised server
       # should not be able to download its own history.
       if aws s3api get-object --bucket "$S3_BUCKET" --key "$PROBE" "$TMPD/back.txt" >/dev/null 2>&1; then
         warn "this credential CAN download objects it wrote — a compromised server could read the cluster CA out of S3" \
-             "# drop s3:GetObject outside velero/* from the writer policy (docs/07-setup.md stage 2)"
+             "# remove s3:GetObject from the Job 1 policy (docs/07-setup.md stage 2)"
       else
         pass "reading back objects is refused — a compromised server cannot exfiltrate old backups"
       fi
 
-      # Guardrail 2: it must not be able to DELETE outside velero/.
+      # Guardrail 2: Job 1 never deletes objects anywhere.
       if aws s3api delete-object --bucket "$S3_BUCKET" --key "$PROBE" >/dev/null 2>&1; then
-        warn "this credential CAN delete objects outside velero/ — a compromised server could destroy the backups" \
-             "# scope s3:DeleteObject to arn:aws:s3:::$S3_BUCKET/velero/* only, never bucket-wide"
+        warn "this Job 1 credential CAN delete objects — a compromised server could destroy backups" \
+             "# remove s3:DeleteObject from the Job 1 policy"
       else
-        pass "delete outside velero/ is correctly refused"
+        pass "delete access is correctly refused for the Job 1 credential"
       fi
 
-      # Guardrail 3: the opposite — it MUST be able to delete inside velero/,
-      # or Velero can never expire a backup and retention silently never happens.
-      if aws s3 cp "$TMPD/probe.txt" "s3://$S3_BUCKET/velero/_preflight-permcheck.txt" \
+      # Guardrail 3: Job 1 and Velero use separate credentials. A leaked host
+      # environment file must not expose the readable/deletable Kopia repo.
+      if aws s3 cp "$TMPD/probe.txt" "s3://$S3_BUCKET/velero/_job1-permcheck.txt" \
            --only-show-errors 2>/dev/null; then
-        if aws s3api delete-object --bucket "$S3_BUCKET" \
-             --key "velero/_preflight-permcheck.txt" >/dev/null 2>&1; then
-          pass "delete inside velero/ works — Velero can expire its own backups"
-        else
-          fail "delete inside velero/ is DENIED — Velero can never expire a backup, so retention silently becomes 'keep forever'" \
-               "# add s3:DeleteObject on arn:aws:s3:::$S3_BUCKET/velero/* to the writer policy"
-        fi
+        warn "the Job 1 credential CAN write velero/ — the credentials are not separated" \
+             "# restrict Job 1 to k3s/*, k3s-release/* and _preflight/*; create a separate Velero policy"
       else
-        warn "could not write a test object under velero/ — Velero's own uploads may fail too" \
-             "# confirm the writer policy covers s3:PutObject on $S3_BUCKET/velero/*"
+        pass "write access to velero/ is refused — Job 1 and Velero blast radii are separated"
       fi
 
       info "test object left at s3://$S3_BUCKET/$PROBE (this credential cannot delete it —"
@@ -271,14 +268,8 @@ else
       info "upload test skipped (--no-upload)"
     fi
 
-    if [ -n "${HEARTBEAT_URL:-}" ] && command -v curl >/dev/null 2>&1; then
-      if curl -fsS -m 15 -o /dev/null "$HEARTBEAT_URL"; then
-        pass "heartbeat endpoint accepted a ping"
-      else
-        fail "the heartbeat endpoint did not accept a ping — alerting would report every backup as missing" \
-             "curl -v -m 15 '$HEARTBEAT_URL'"
-      fi
-    fi
+    [ -n "${HEARTBEAT_URL:-}" ] \
+      && info "heartbeat not pinged by preflight — only a verified real backup may reset the dead-man timer"
   fi
 fi
 
@@ -458,7 +449,7 @@ cat <<'EOF'
           Secret — the only lever is rolling the whole datastore back, which
           reverts everything else too.
 
-    [ ] Restoring into a fresh or different-version cluster
+    [ ] Rebuilding into a fresh, source-compatible cluster identity
 
   If Velero is not installed yet, everything under Job 2 is uncovered today.
 

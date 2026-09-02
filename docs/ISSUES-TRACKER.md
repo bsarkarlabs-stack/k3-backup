@@ -53,17 +53,17 @@ Signed off by / date:
 ### 3. [#10](../../../issues/10) — Phase 2: Job 1, the K3s server backup
 **Priority: Highest**
 
-Commands: [07 stages 2–3](07-setup.md#stage-2--create-the-bucket-and-the-one-credential).
+Commands: [07 stages 2–3](07-setup.md#stage-2--create-the-bucket-and-two-scoped-workload-credentials).
 
 - Bucket: public access blocked, versioning on, **default SSE-S3**, HTTPS-only bucket policy
-- Four lifecycle rules — `k3s/daily/` 8 d, `k3s/weekly/` 31 d, `_preflight/` 2 d, abort stuck
-  multipart uploads. **Nothing on `velero/`, nothing on `k3s-release/`**
-- **One** IAM user: `PutObject` on `k3s/*` + `k3s-release/*`, `ListBucket` on the bucket, full
-  control on `velero/*` only. No `GetObject` and no `DeleteObject` outside `velero/`
+- Six lifecycle rules: Job 1 current expiry, noncurrent-only expiry for `velero/` and releases,
+  preflight expiry, and abort stuck multipart uploads
+- Separate Job 1 and Velero users. Job 1 is write-only on its prefixes; Velero has full control
+  only on `velero/*`
 - Deploy `scripts/k3s-server-backup.sh` + the two systemd units
 - Preflight with AWS: confirm read-back and delete are **refused**
-- `DRY_RUN=1` → one `.tar.gz`, one `.sha256`, one `MANIFEST.json`, and `NRestarts` unchanged
-- One real run → three objects in `k3s/daily/YYYY-MM-DD/` and the binary in `k3s-release/`
+- `DRY_RUN=1` → archive, checksum, manifest, completion marker, and `NRestarts` unchanged
+- One real run → committed unique prefix and binary plus checksum in `k3s-release/`
 - `systemctl enable --now k3s-backup.timer`
 
 **Answer / Output:**
@@ -79,14 +79,15 @@ Commands: [07 stages 2–3](07-setup.md#stage-2--create-the-bucket-and-the-one-c
 Commands: [07 stage 4](07-setup.md#stage-4--deploy-job-2-velero).
 
 - Find K3s's kubelet root **before** trusting anything
-- Run `scripts/velero/install-velero.sh` — node-agent on, `prefix=velero`, no volume snapshots,
+- Install Velero CLI `v1.18.0`; run the installer with AWS plugin `v1.14.1`, verified
+  `KUBELET_ROOT_DIR`, node-agent on, `prefix=velero`, no volume snapshots,
   `--default-volumes-to-fs-backup`
 - Apply `schedule-daily.yaml` and `schedule-weekly.yaml`
 - **Verify the node-agent really reads the volumes:** `velero backup describe <name> --details` must
   list all six monitoring PVCs under *Pod Volume Backups*. An empty list is a silent total failure
   that still reports success
 - Confirm the `argocd` namespace backup contains its Secrets and Applications (retires #20/#1)
-- One test restore into a scratch namespace
+- One object restore and one controller-aware PVC restore with ArgoCD suspended
 - After a week, confirm old backups actually expire (proves the `velero/` delete permission)
 
 **Answer / Output:**
@@ -101,24 +102,22 @@ Commands: [07 stage 4](07-setup.md#stage-4--deploy-job-2-velero).
 
 Four alerts ([02 §7](02-backup-strategy.md#7-knowing-it-works)):
 
-1. **No Job 1 backup in 26 h** — an off-server heartbeat. **This is the only one that still works
-   when `k3-master` is dead.** The script already pings `HEARTBEAT_URL` after verifying its objects
-   landed in S3; the open question is *what receives it*
-2. Velero's `velero_backup_last_successful_timestamp` going stale — in-cluster
-3. **Pod-volume count in the last Velero backup below the cluster's PVC count** — in-cluster. A
-   backup that captured nothing is still `Completed`, so #2 alone would never notice
+1. **No Job 1 backup in 26 h** — external heartbeat after a committed S3 set
+2. **No verified Velero backup in 30 h** — separate external heartbeat
+3. Latest scheduled Backup/PVB set failed, stale, already reported, or below `MIN_EXPECTED_PVBS` — suppresses #2 ping
 4. Root disk free under 10% — in-cluster
 
-Options for #1: a hosted dead-man's switch (healthchecks.io / Cronitor, ~5 minutes); AWS EventBridge
+Options for #1/#2: a hosted dead-man's switch (healthchecks.io / Cronitor); AWS EventBridge
 on S3 `ObjectCreated` + a CloudWatch alarm treating missing data as breaching; or an Alertmanager
 hosted outside this cluster.
 
-Then **test all three by deliberately breaking them.**
+Then **test all four by deliberately breaking them.**
 
 **Answer / Output:**
 ```
-Heartbeat channel chosen:
+Two heartbeat checks chosen:
 HEARTBEAT_URL set on the node:      yes / no
+VELERO_HEARTBEAT_URL set:           yes / no
 Alert 1 tested by breaking it:      yes / no
 Alert 2 tested:                     yes / no
 Alert 3 tested:                     yes / no
@@ -137,7 +136,8 @@ Procedure: [03 §C](03-restore-runbook.md#c--the-restore-test).
 - Confirm restored **Prometheus answers a query over pre-incident data** — proof the volume restore
   worked, not just that the pod started
 - Confirm HTTPS comes back valid
-- Run §B once against a scratch namespace
+- Run §B's one-object path; §A already exercises PVC recovery
+- Record whether live monitoring files are accepted as best-effort or need application-native backup
 - Record real timings, fix the runbook to match reality, set the actual RTO
 - Diary the repeat for 3–6 months out
 
@@ -177,7 +177,7 @@ only works if the access isn't a single point of failure.
 ```
 People who can read s3://k3-master-dr:
 Bucket name + region recorded outside AWS:   yes / no
-Who rotates the backup-writer key, and how often:
+Who rotates the Job 1 and Velero keys, and how often:
 ```
 
 ---

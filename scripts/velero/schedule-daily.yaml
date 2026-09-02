@@ -1,9 +1,10 @@
 # Job 2 of 2 — everything inside the cluster, including PVC data.
 #
-# Runs 45 minutes after the k3s server backup so the two jobs never contend
-# for the disk. TTL is what expires these backups: Velero deletes its own
-# objects, which is why the credential needs s3:DeleteObject on velero/* and
-# why there must be NO S3 lifecycle rule on that prefix.
+# Starts after Job 1's maximum systemd timeout. Sunday is excluded because the
+# weekly schedule replaces it, so two FSB jobs cannot overlap. TTL is what
+# expires these backups: Velero deletes its own objects, which is why its
+# dedicated credential needs s3:DeleteObject on velero/* and why there must be
+# NO current-version S3 lifecycle rule on that prefix.
 #
 #   kubectl apply -f schedule-daily.yaml
 #
@@ -13,10 +14,12 @@ metadata:
   name: daily
   namespace: velero
 spec:
-  schedule: "0 3 * * *"
+  # Monday-Saturday. Sunday is supplied by the weekly schedule at the same
+  # time, so two full file-system backups can never overlap.
+  schedule: "CRON_TZ=UTC 30 3 * * 1-6"
   useOwnerReferencesInBackup: false
   template:
-    # 168h = 7 days -> 7 daily restore points.
+    # 168h = 7 days -> the six Monday-Saturday points remain available.
     ttl: 168h0m0s
 
     # No includedNamespaces: every namespace, present and future. A new
