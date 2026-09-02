@@ -353,11 +353,15 @@ volumes, plus ~70 MB per K3s version. Single-digit dollars a month.
 | 3 | Latest scheduled Backup/PVB set is failed or incomplete | Host verifier; suppresses alert 2 heartbeat | any failure or fewer than configured minimum |
 | 4 | Root disk free space low | Prometheus/Alertmanager, in-cluster | under 10% |
 
+Commands for all four: [07 steps 5.1–5.4](07-setup.md#51--choose-the-two-dead-man-checks-local).
+None of them counts as working until it has been broken on purpose
+([07 step 5.5](07-setup.md#55--break-every-alert-on-purpose)).
+
 ### Alert 3 exists because `Completed` is not the same as "it backed something up"
 
 This is the failure this design predicts about itself: if the node-agent cannot reach the kubelet
 root, it backs up **nothing** and the backup still finishes `Completed`
-([gap 6](05-gaps-and-open-questions.md)). Alert 2 would stay green through it, every night, until a
+([gap 6](05-gaps-and-open-questions.md#6-whether-veleros-node-agent-can-actually-read-our-volumes)). Alert 2 would stay green through it, every night, until a
 restore discovered the truth.
 
 So the assertion has to be about **volume count, not backup status**. Each volume the node-agent
@@ -500,4 +504,5 @@ The design is only as good as these answers. See
 | 2 | **The two heartbeats have nowhere to report yet** — scripts exist, endpoints are not wired |
 | 3 | **Nothing has ever been restored** — §10 |
 | 4 | **Where Traefik's TLS certificates come from.** If Traefik issues them itself and keeps `acme.json` in an `emptyDir`, nothing here backs it up and a restore comes back with broken HTTPS and no warning |
-| 5 | **Velero's node-agent vs. K3s's kubelet root.** A path mismatch starts cleanly and backs up *nothing* — it looks like an empty backup, not an error |
+| 5 | **Who can actually perform a restore** — no stored restore key means two named people with AWS access |
+| 6 | **Velero's node-agent vs. K3s's kubelet root.** A path mismatch starts cleanly and backs up *nothing* — it looks like an empty backup, not an error |

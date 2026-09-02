@@ -7,16 +7,60 @@ meant to be run **one at a time**, checking the "check" that follows before movi
 
 Five stages, in order:
 
-| Stage | What it does | Where | Downtime risk |
-|-------|--------------|-------|---------------|
-| [1](#stage-1--validate-the-server) | Validate — is everything we assumed still true? | `[node]` | **None** — read-only |
-| [2](#stage-2--create-the-bucket-and-two-scoped-workload-credentials) | Create the bucket and two scoped AWS credentials | `[local]` | **None** — doesn't touch the server |
-| [3](#stage-3--deploy-job-1) | Deploy Job 1: the K3s backup + timer | `[node]` | **Very low** — only reads K3s's data |
-| [4](#stage-4--deploy-job-2-velero) | Deploy Job 2: Velero | `[local]` | Low — installs into the cluster |
-| [5](#stage-5--monitoring-and-the-restore-test) | Wire the alerts, then prove a restore works | both | **None** |
+| Stage | What it does | Steps | Where | Downtime risk |
+|-------|--------------|-------|-------|---------------|
+| [1](#stage-1--validate-the-server) | Validate — is everything we assumed still true? | 1.1–1.7 | `[node]` | **None** — read-only |
+| [2](#stage-2--create-the-bucket-and-two-scoped-workload-credentials) | Create the bucket and two scoped AWS credentials | 2.1–2.7 | `[local]` | **None** — doesn't touch the server |
+| [3](#stage-3--deploy-job-1) | Deploy Job 1: the K3s backup + timer | 3.1–3.8 | `[node]` | **Very low** — only reads K3s's data |
+| [4](#stage-4--deploy-job-2-velero) | Deploy Job 2: Velero, and prove it reads the volumes | 4.1–4.6 | `[local]` | Low — installs into the cluster |
+| [5](#stage-5--monitoring-and-the-restore-test) | Wire and test the four alerts, then prove a restore works | 5.1–5.7 | both | **None** |
 
 `[local]` means your own laptop with your AWS admin login. `[node]` means an SSH session on
 `k3-master`.
+
+### Every step, in order
+
+This is the full list. [04 — Implementation TODO](04-implementation-todo.md) is the same work as
+checkboxes and [ISSUES-TRACKER](ISSUES-TRACKER.md) is where the answers get pasted; nothing is
+required of you that isn't a step below.
+
+| Step | What you do | Where | Why it's on the list |
+|------|-------------|-------|----------------------|
+| [1.1](#11--run-the-preflight-checker-node) | Run the preflight with `--no-aws` | `[node]` | Finds local blockers before any AWS resource exists |
+| [1.2](#12--confirm-the-baseline-still-holds-node) | Re-confirm hostname, version, service, disk, datastore | `[node]` | [01](01-discovery-baseline.md) is only useful if it's still true |
+| [1.3](#13--look-inside-tls-and-cred-node) | List `tls/` and `cred/`; record certificate expiry | `[node]` | Nothing identity-related may sit outside the backup's paths |
+| [1.4](#14--is-secrets-encryption-on-node) | `k3s secrets-encrypt status` | `[node]` | Decides how hard a precondition `cred/` is at restore |
+| [1.5](#15--where-do-the-https-certificates-come-from-node) | Find where Traefik's HTTPS certificates live | `[node]` | The one answer that can change the design |
+| [1.6](#16--confirm-a-safe-sqlite-backup-is-possible-node) | Confirm Python's `sqlite3` module works | `[node]` | Keeps this design free of new software on production |
+| [1.7](#17--agree-an-rpo-and-an-rto-decision) | **Agree an RPO and an RTO**, or record the assumption | decision | "Daily" is arbitrary until these two numbers exist |
+| [2.1](#21--pick-a-region) | Pick a region | `[local]` | Can't be changed later |
+| [2.2](#22--create-the-bucket) | Create the bucket | `[local]` | — |
+| [2.3](#23--lock-it-down-before-anything-is-uploaded) | Block public access, versioning, SSE-S3, HTTPS-only policy | `[local]` | This bucket holds the cluster CA |
+| [2.4](#24--retention-rules) | Six lifecycle rules | `[local]` | Without them nothing ever expires |
+| [2.5](#25--create-separate-job-1-and-velero-credentials) | Create the Job 1 and Velero credentials | `[local]` | Two failure domains, two keys |
+| [2.6](#26--check-all-of-stage-2-at-once) | Verify every bucket and IAM setting | `[local]` | The only place bucket config is checked |
+| [2.7](#27--write-down-who-can-restore-local) | Name who can restore; record bucket, region, key owners | writing | No stored restore key means access must not be one person |
+| [3.1](#31--write-the-config-node) | Write `/etc/k3s-backup/backup.env` | `[node]` | — |
+| [3.2](#32--install-the-script-and-units-node) | Install the script and both units | `[node]` | — |
+| [3.3](#33--re-run-the-preflight-this-time-with-aws-node) | Preflight with AWS; read-back and delete must be refused | `[node]` | Proves the write-only credential really is write-only |
+| [3.4](#34--write-down-the-current-state-so-you-can-prove-nothing-changed-node) | Record `NRestarts` and node state | `[node]` | The baseline for the zero-downtime claim |
+| [3.5](#35--dry-run-build-the-archive-upload-nothing-node) | `DRY_RUN=1` run; check the manifest | `[node]` | Builds everything, uploads nothing |
+| [3.6](#36--first-real-run-node) | First real run; confirm the committed set in S3 | `[node]` | — |
+| [3.7](#37--verify-the-archive-off-the-server-local) | Download it and verify the integrity chain | `[local]` | Practises the restore-time check while nothing is on fire |
+| [3.8](#38--turn-the-schedule-on-node) | Enable the timer | `[node]` | — |
+| [4.1](#41--find-the-kubelet-root-node) | Find K3s's kubelet root | `[node]` | A mismatch backs up **nothing** and still says `Completed` |
+| [4.2](#42--install-velero-local) | Install Velero and apply both schedules; record the versions | `[local]` | — |
+| [4.3](#43--prove-the-node-agent-actually-reads-the-volumes-local) | Prove all six PVCs appear as Pod Volume Backups | `[local]` | [gap 6](05-gaps-and-open-questions.md#6-whether-veleros-node-agent-can-actually-read-our-volumes) — the likeliest silent failure |
+| [4.4](#44--confirm-object-coverage-including-argocd-local) | Confirm cluster-scoped objects and the `argocd` namespace | `[local]` | What retires a separate ArgoCD export |
+| [4.5](#45--prove-one-narrow-restore-local) | Restore one object into a scratch namespace | `[local]` | The 10-minute flow you'll actually use most |
+| [4.6](#46--a-week-later-confirm-backups-expire-local) | A week later: confirm old backups expire | `[local]` | Proves Velero's delete permission is right |
+| [5.1](#51--choose-the-two-dead-man-checks-local) | Create two external dead-man checks | `[local]` | [gap 2](05-gaps-and-open-questions.md#2-the-external-heartbeats-have-nowhere-to-report-yet) — alerts 1 and 2 |
+| [5.2](#52--wire-job-1s-heartbeat-node) | Set `HEARTBEAT_URL` and confirm the ping | `[node]` | Alert 1 |
+| [5.3](#53--install-the-velero-verifier-and-its-heartbeat-node) | Install the verifier, its timer and `MIN_EXPECTED_PVBS` | `[node]` | Alerts 2 and 3 |
+| [5.4](#54--alert-on-root-disk-space-local) | Alert on root disk under 10% | `[local]` | Alert 4 |
+| [5.5](#55--break-every-alert-on-purpose) | Break all four alerts deliberately | both | An untested alert is a decoration |
+| [5.6](#56--watch-the-first-few-runs-node) | Watch two or three runs, then stop | `[node]` | — |
+| [5.7](#57--prove-a-restore-works) | Run the restore test on a throwaway VM | `[local]` | **Nothing before this counts as proven** |
 
 **Ground rules.** Nothing in stages 1–3 restarts, reloads or reconfigures K3s. If you find yourself
 about to type `systemctl restart k3s`, you've gone off-script — stop. Keep a second SSH session
@@ -173,6 +217,32 @@ python3 -c "import sqlite3; print('ok, sqlite', sqlite3.sqlite_version)"
 has the same online backup API as the CLI tool, which keeps this whole setup free of new software
 on a production server.
 
+### 1.7 — Agree an RPO and an RTO `[decision]`
+
+The only step in this document with no command, and the one everything else is measured against.
+Daily backups are the right answer *if* losing up to a day of cluster state is acceptable; without
+the two numbers, "daily" is a default nobody examined
+([gap 1](05-gaps-and-open-questions.md#1-rpo-and-rto-are-not-signed-off)).
+
+Take the working assumptions to whoever owns the service and come back with either a signature or
+different numbers:
+
+| | Meaning | Working assumption |
+|---|---|---|
+| **RPO** | How much recent change we accept losing | 24 hours |
+| **RTO** | How long a rebuild may take before it's a business problem | 2–4 hours |
+
+[02 §1](02-backup-strategy.md#1-two-numbers-to-agree-on-first--still-open) lists exactly what
+changes for each possible answer — an RPO under 6 h adds a third prefix and a second Velero
+Schedule, an RTO under 1 h means a warm standby rather than backups. Cheap to revisit, expensive to
+assume.
+
+**Check:** write the agreed numbers and who signed them into
+[02 §1](02-backup-strategy.md#1-two-numbers-to-agree-on-first--still-open) and
+the *Agree an RPO and an RTO* entry in [ISSUES-TRACKER](ISSUES-TRACKER.md). "We accept the
+assumption as written, <name>, <date>" is a
+perfectly good answer — an unexamined default is not.
+
 ---
 
 ## Stage 2 — Create the bucket and two scoped workload credentials
@@ -304,7 +374,9 @@ rm -f /tmp/k3-dr-lifecycle.json
 > Velero's file-system backups live in a Kopia repository whose objects reference each other, and
 > Velero expires them itself using each Schedule's `ttl`. An S3 expiry rule would delete chunks a
 > still-valid backup depends on, and the corruption only shows up when you try to restore. If you
-> The rules above expire only noncurrent S3 versions. They never remove a current Kopia object.
+> want a safety net on that prefix, it must be a *noncurrent version* rule and never a
+> current-version one. The rules above expire only noncurrent S3 versions; they never remove a
+> current Kopia object.
 >
 > `k3s-release/` holds the K3s binaries a future restore needs. It must never expire.
 
@@ -437,6 +509,33 @@ current-version expiry on `velero/` or `k3s-release/`, and one inline policy on 
 **This is the only place bucket settings get verified.** The on-node preflight deliberately doesn't
 check them — that credential can't read bucket configuration, and it shouldn't be able to.
 
+### 2.7 — Write down who can restore `[local]`
+
+Five minutes of writing, and it's what makes the "no stored restore key" decision safe rather than
+fragile ([gap 5](05-gaps-and-open-questions.md#5-who-can-actually-perform-a-restore)). A restore
+uses a human AWS login, so the restore path fails if that login is one person on holiday.
+
+```bash
+# who can actually reach the bucket today
+aws iam list-users --query 'Users[].UserName' --output table
+aws sts get-caller-identity
+```
+
+Record all four of these under *Who can actually perform a restore* in
+[ISSUES-TRACKER](ISSUES-TRACKER.md) — the answers, not just the question:
+
+1. **At least two named people** who can log into AWS and read `s3://k3-master-dr`. One is not a
+   plan; it's a single point of failure with a name.
+2. **The bucket name and region, somewhere that survives losing access to this AWS account.** This
+   repo counts and already states both — confirm that's still true rather than assuming it.
+3. **Who owns and rotates the two workload keys** (Job 1 and Velero), and how often. These are
+   long-lived keys by deliberate choice; an unowned long-lived key is the part that ages badly.
+4. **Where the recovery kit lives** — this repo, cloned somewhere that is not `k3-master`. The
+   restore runbook needs `scripts/velero/` before the cluster it describes exists again.
+
+**Check:** someone other than you can answer "how would you start a restore tomorrow?" by reading
+what you just wrote, without asking you anything.
+
 ---
 
 ## Stage 3 — Deploy Job 1
@@ -563,7 +662,9 @@ size, so a clean exit is already meaningful. Confirm independently anyway:
 
 ```bash
 set -a; . /etc/k3s-backup/backup.env; set +a
-sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/" --recursive --human-readable
+# Prefix-scoped: the Job 1 key cannot list the bucket root.
+sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/k3s/" --recursive --human-readable
+sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/k3s-release/" --recursive --human-readable
 ```
 
 ```text
@@ -696,7 +797,7 @@ before the 03:30 UTC Velero window. The script also takes a lock, so two Job 1 r
 **This is half the design, not an optional extra.** Job 1 cannot restore a deleted PVC or a single
 deleted Secret, and `local-path` destroys a volume's files the instant its PVC goes away.
 
-### 4.1 — Install the CLI and find the kubelet root `[node]`
+### 4.1 — Find the kubelet root `[node]`
 
 Velero's file-system backup reads pod volumes through a hostPath into the kubelet root. K3s does not
 always use the stock `/var/lib/kubelet`, and **a mismatch starts cleanly and backs up nothing** —
@@ -739,6 +840,21 @@ kubectl apply -f scripts/velero/schedule-weekly.yaml
 
 No encryption flags are passed — the bucket's default SSE-S3 encrypts every object on arrival.
 
+**Check, and write these three versions down** — a restore has to reproduce them, and `velero
+install` deploys `velero/velero:<CLI version>`, so an unpinned CLI silently decides the server
+version:
+
+```bash
+velero version                    # client and server should both read v1.18.0
+kubectl -n velero get deploy velero \
+  -o jsonpath='{.spec.template.spec.initContainers[*].image}{"\n"}'   # plugin v1.14.1
+kubectl -n velero get schedules   # daily and weekly, both Enabled
+```
+
+Record the CLI, server and plugin versions in [01](01-discovery-baseline.md) alongside the K3s
+version. Restoring into a cluster whose Velero predates the backup's format is a migration, not a
+restore.
+
 ### 4.3 — Prove the node-agent actually reads the volumes `[local]`
 
 A green checkmark is not evidence. This is
@@ -758,34 +874,135 @@ velero backup describe <name> --details
 appear under "Pod Volume Backups"**. An empty section there is the failure — stop and fix it before
 trusting anything.
 
-Also confirm, while you're here:
+Count the pod volumes in that backup and keep the number; it becomes `MIN_EXPECTED_PVBS` in 5.3:
 
-- Cluster-scoped resources are in the backup (CRDs, ClusterRoles, StorageClass).
-- The `argocd` namespace backup contains its Secrets and Applications — that's what retires the
-  separate ArgoCD export for good.
-- One narrow object restore works. Exercise PVC recovery only with §B's controller-aware procedure;
-  a scratch namespace by itself cannot prove cross-namespace volume copy-back.
-- After a week, that old backups really do expire — proof the `velero/` delete permission is right.
+```bash
+kubectl -n velero get podvolumebackups \
+  -l velero.io/backup-name=<name> --no-headers | wc -l      # expect 6
+```
+
+Use that count, **not** the raw PVC count: an unmounted claim produces no pod volume, and a volume
+mounted by two pods produces two. The number that matters is what the node-agent actually did.
+
+### 4.4 — Confirm object coverage, including ArgoCD `[local]`
+
+The backup takes everything by default, so this is verifying there's no surprise rather than
+building an include list. It's also what retires the separate daily `argocd admin export` for good
+(the *ArgoCD recoverability* entry in [ISSUES-TRACKER](ISSUES-TRACKER.md)).
+
+```bash
+velero backup describe <name> --details | sed -n '/Resource List/,$p' | head -40
+
+# cluster-scoped objects must be in there, not just namespaced ones
+velero backup describe <name> --details | grep -E 'customresourcedefinitions|clusterroles|storageclasses'
+
+# ArgoCD's own state: Applications, AppProjects and its Secrets
+velero backup describe <name> --details | grep -E 'argocd/'
+```
+
+**Check:**
+
+- CRDs, ClusterRoles, ClusterRoleBindings and the StorageClass all appear.
+- The `argocd` namespace contributes Secrets, Applications and AppProjects. Anything hand-made in
+  the UI comes back from Velero and *not* from Git, which is exactly why this has to be confirmed.
+- While you're here, write down **which Git repositories and logins ArgoCD depends on**. Velero
+  restores the Application objects; it cannot restore access to a repo whose deploy key nobody has.
+
+### 4.5 — Prove one narrow restore `[local]`
+
+The ~10-minute flow you will actually use most often, so prove it while nothing is wrong. Full
+procedure: [03 §B](03-restore-runbook.md#b--restoring-one-pvc-or-one-object).
+
+```bash
+kubectl create namespace restore-probe
+kubectl -n restore-probe create configmap probe --from-literal=k=v
+velero backup create probe-$(date +%s) --include-namespaces restore-probe --wait
+
+kubectl delete namespace restore-probe
+velero restore create --from-backup <probe-backup> --include-namespaces restore-probe --wait
+kubectl -n restore-probe get configmap probe -o jsonpath='{.data.k}{"\n"}'   # v
+
+kubectl delete namespace restore-probe
+```
+
+**Check:** the ConfigMap comes back with its data. Then stop there — **do not** try to prove PVC
+recovery with a scratch namespace. Volume data only returns when Velero creates the pod, so a
+meaningful PVC test requires the controller-aware procedure in
+[03 §B](03-restore-runbook.md#one-pvcs-data) (suspend ArgoCD, delete the owning workload *and* the
+claim) and the real thing is exercised by the restore test in 5.7.
+
+### 4.6 — A week later: confirm backups expire `[local]`
+
+Put this in your calendar for eight days out. It is the only proof that Velero's delete permission
+on `velero/*` works — and if it doesn't, retention is fiction and the bucket grows forever.
+
+```bash
+velero backup get                       # nothing older than 7 days in the daily tier
+velero backup get -l velero.io/schedule-name=weekly
+aws s3 ls "s3://$BUCKET/velero/backups/" | wc -l
+```
+
+**Check:** daily-tier backups older than 168 h are gone, Sunday ones survive to 720 h, and the
+object count is flat rather than climbing. If nothing ever expires, re-read the Velero policy in
+2.5 before "fixing" the schedules.
 
 ---
 
 ## Stage 5 — Monitoring and the restore test
 
-### 5.1 — Wire the four alerts
+Four alerts, and only four. Design and thresholds:
+[02 §7](02-backup-strategy.md#7-knowing-it-works).
 
-Design and thresholds are in [02 §7](02-backup-strategy.md#7-knowing-it-works). In short:
+| # | Alert | Threshold | Set up in |
+|---|-------|-----------|-----------|
+| 1 | No Job 1 backup arrived | 26 h | 5.1 + 5.2 |
+| 2 | No verified Velero backup arrived | 30 h | 5.1 + 5.3 |
+| 3 | A scheduled Backup or any of its PodVolumeBackups is bad | any failure, or fewer volumes than expected | 5.3 (suppresses alert 2's ping) |
+| 4 | Root disk free space low | under 10% | 5.4 |
 
-| # | Alert | Status |
-|---|-------|--------|
-| 1 | No Job 1 backup arrived in 26 h — **off-server heartbeat** | ⏳ channel undecided ([gap 2](05-gaps-and-open-questions.md#2-the-external-heartbeats-have-nowhere-to-report-yet)) |
-| 2 | No verified Velero backup/PVB heartbeat in 30 h — **off-server** | script and timer included; endpoint to do |
-| 3 | A scheduled Backup or any of its PodVolumeBackups is not `Completed` | enforced by the same external check |
-| 4 | Root disk free under 10% — in-cluster | to do |
+### 5.1 — Choose the two dead-man checks `[local]`
 
-Install the supplied verifier on the node. It selects the newest `daily` or `weekly` scheduled
-backup by creation timestamp, requires it to be fresh and `Completed`, requires at least the
-configured number of completed `PodVolumeBackups`, requires it to be a backup it has not already
-reported, and only then pings the second dead-man URL:
+Alerts 1 and 2 must terminate **outside** this cluster. Prometheus and Alertmanager run inside the
+cluster we're protecting, so they die with the thing they'd be reporting on
+([gap 2](05-gaps-and-open-questions.md#2-the-external-heartbeats-have-nowhere-to-report-yet)).
+
+Pick one channel and create **two separate checks** in it:
+
+| Option | Effort | Notes |
+|--------|--------|-------|
+| Hosted dead-man's switch (healthchecks.io, Cronitor) | ~5 min | Free tier is enough. Two URLs, no infrastructure. **The default recommendation** |
+| AWS-native: EventBridge on S3 `ObjectCreated` under `k3s/daily/` → CloudWatch alarm treating missing data as breaching | ~1 hour | No third party, more moving parts, and it watches the bucket rather than the job |
+| An Alertmanager or push gateway hosted outside this cluster | varies | Only worth it if one already exists |
+
+Configure the two checks as:
+
+| Check | Period | Grace | Who pings it |
+|-------|--------|-------|--------------|
+| `k3-master job 1` | 24 h | 2 h → alerts at 26 h | `k3s-server-backup.sh`, after `COMPLETE.json` is verified in S3 |
+| `k3-master velero` | 24 h | 6 h → alerts at 30 h | `check-last-backup.sh`, after a *new* backup passes every check |
+
+**Two checks, not one.** A shared URL lets either job keep the light green while the other is
+dead — which is the exact failure the alert exists to catch. Route both to somewhere a human
+actually reads, and record which channel and who receives it under *Alerting, and where the
+heartbeat reports to* in [ISSUES-TRACKER](ISSUES-TRACKER.md).
+
+### 5.2 — Wire Job 1's heartbeat `[node]`
+
+```bash
+sudo sed -i 's|^HEARTBEAT_URL=.*|HEARTBEAT_URL=https://<job-1-check-url>|' /etc/k3s-backup/backup.env
+sudo systemctl start k3s-backup.service
+sudo journalctl -u k3s-backup.service -n 20 --no-pager | grep -i heartbeat
+```
+
+**Check:** the log says `heartbeat sent`, and the external check flips to "up" within a minute. The
+ping happens *after* the objects are verified in S3, so a green check means the backup arrived —
+not that the script is pleased with itself.
+
+### 5.3 — Install the Velero verifier and its heartbeat `[node]`
+
+This is alerts 2 and 3 in one script. It selects the newest `daily` or `weekly` scheduled backup,
+requires it to be fresh, `Completed`, backed by enough completed `PodVolumeBackups`, and **not a
+backup it has already reported** — then pings the second dead-man URL.
 
 ```bash
 # [local]
@@ -799,39 +1016,102 @@ sudo install -m 0644 /tmp/velero-backup-check.service \
   /tmp/velero-backup-check.timer /etc/systemd/system/
 sudo install -m 0600 /dev/null /etc/k3s-backup/velero-monitor.env
 sudo tee /etc/k3s-backup/velero-monitor.env >/dev/null <<'EOF'
-VELERO_HEARTBEAT_URL=https://...
+VELERO_HEARTBEAT_URL=https://<velero-check-url>
 MIN_EXPECTED_PVBS=6
 MAX_AGE_HOURS=30
 EOF
 sudo systemctl daemon-reload
 sudo systemctl enable --now velero-backup-check.timer
 sudo systemctl start velero-backup-check.service
+sudo journalctl -u velero-backup-check.service -n 20 --no-pager
 ```
 
-Set `MIN_EXPECTED_PVBS` from the verified backup in 4.3, not from raw PVC count. Update it whenever
-the mounted volume topology changes.
+**Check:** the log ends with `verified and reported <backup-name>`, the external check goes green,
+and `systemctl list-timers 'velero-backup-check*'` shows the next run at 06:30 UTC.
 
-The verifier keeps the UID of the last backup it reported in `/var/lib/k3s-backup/velero-last-reported`
-and will not ping twice for the same backup, so a skipped schedule stops the heartbeat even while
-yesterday's backup is still inside `MAX_AGE_HOURS`. Two consequences worth knowing before you go
-live: the first run after install pings immediately, and deleting that state file causes one extra
-ping for a backup already reported. Never "fix" a firing alert by removing it.
+`MIN_EXPECTED_PVBS` comes from the volume count you took in 4.3 — **not** from the PVC count. Raise
+or lower it whenever the mounted volume topology changes; leaving it stale is how a lost volume
+stops being noticed.
 
-Configure a **separate dead-man check URL** for Job 1 and Velero. Sharing one URL lets either job
-hide the failure of the other.
+The verifier records the UID of the backup it last reported in
+`/var/lib/k3s-backup/velero-last-reported` and refuses to ping twice for the same one, so a skipped
+schedule stops the heartbeat even while yesterday's backup is still inside `MAX_AGE_HOURS`. Two
+consequences to know before you go live: the first run after install pings immediately, and
+deleting that state file causes one extra ping for a backup already reported. **Never "fix" a firing
+alert by deleting it.**
+
+### 5.4 — Alert on root disk space `[local]`
+
+The one in-cluster alert, because it's the one failure the cluster itself can still report. `/`
+holds the datastore, every `local-path` volume and the backup staging directory; at 100% full K3s
+stops writing and the backup fails with it.
 
 ```bash
-sudo sed -i 's|^HEARTBEAT_URL=.*|HEARTBEAT_URL=https://...|' /etc/k3s-backup/backup.env
-sudo systemctl start k3s-backup.service     # confirm "heartbeat sent" in the log
+kubectl get prometheusrule -A | head            # confirms the operator-based stack
 ```
 
-**Test each alert by deliberately breaking it.** An untested alert is a decoration. Pause each
-timer/check separately and confirm the corresponding external check alerts.
+If that returns rules, add one beside them:
 
-Both backup-success alerts terminate outside the cluster, so server loss also becomes a missed
-heartbeat rather than taking the alerting system down silently.
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: k3s-backup-host
+  namespace: monitoring        # match the namespace your other rules use
+spec:
+  groups:
+    - name: k3s-backup-host
+      rules:
+        - alert: RootDiskAlmostFull
+          # 10% of / left. The datastore, every local-path volume and the
+          # backup staging area all live here.
+          expr: |
+            node_filesystem_avail_bytes{mountpoint="/",fstype!~"tmpfs|overlay"}
+              / node_filesystem_size_bytes{mountpoint="/",fstype!~"tmpfs|overlay"} < 0.10
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "k3-master root filesystem below 10% free"
+            runbook: "docs/07-setup.md#54--alert-on-root-disk-space-local"
+```
 
-### 5.2 — Watch the first few runs `[node]`
+```bash
+kubectl apply -f k3s-backup-host-rule.yaml
+kubectl -n monitoring get prometheusrule k3s-backup-host
+```
+
+**Check:** the rule appears in Prometheus's *Rules* page and is not in `err` state. If this cluster
+has no rule-based Prometheus, the fallback is a `df` check inside the Velero verifier's environment
+— but write down which one you chose, because "we thought the other one covered it" is how disk
+alerts go missing.
+
+### 5.5 — Break every alert on purpose
+
+**An untested alert is a decoration.** Do these one at a time and confirm exactly one alert fires
+each time. Budget an hour; this is the step that finds the typo in the URL.
+
+| Alert | How to break it | Expect |
+|-------|-----------------|--------|
+| 1 | `sudo systemctl stop k3s-backup.timer` and leave it stopped past the grace window | The Job 1 dead-man check alerts at 26 h |
+| 2 | `sudo systemctl stop velero-backup-check.timer` for one cycle | The Velero check alerts at 30 h |
+| 2 (missed run) | After 5.3 has already reported a backup, run `sudo systemctl start velero-backup-check.service` again with **no** new Velero backup in between | Exits non-zero, logs "a scheduled run was missed", and **does not** ping. (5.3 already consumed the first ping; a second run is the test.) |
+| 3 (volume count) | `sudo sed -i 's/^MIN_EXPECTED_PVBS=.*/MIN_EXPECTED_PVBS=99/' /etc/k3s-backup/velero-monitor.env`, then run the service | Exits non-zero with "captured 6 pod volumes; expected at least 99", no ping. **Put the real value back** |
+| 4 | Temporarily lower the rule's threshold above current usage, or fill a scratch file | The disk alert fires, then remove the file and restore the threshold |
+
+Re-enable everything afterwards and confirm all four checks are green again:
+
+```bash
+sudo systemctl enable --now k3s-backup.timer velero-backup-check.timer
+systemctl list-timers 'k3s-backup*' 'velero-backup-check*' --no-pager
+```
+
+Record which alerts you tested, and on what date, in the same
+[ISSUES-TRACKER](ISSUES-TRACKER.md) entry. Both
+backup-success alerts terminate off-server, so losing the whole host shows up as a missed heartbeat
+rather than as silence.
+
+### 5.6 — Watch the first few runs `[node]`
 
 Takes about 30 seconds a day, for two or three days — not a week, because the alerts are the
 monitoring plan, not you.
@@ -852,11 +1132,39 @@ usage flat at roughly 200 MB once the lifecycle rules start expiring things.
 > credentials and bucket name into the shell. Without it you get `Unable to locate credentials`,
 > which looks like a permissions problem and isn't.
 
-### 5.3 — Prove a restore works
+**One check that can only happen on a Sunday:** after the first weekend, confirm Job 1 wrote the
+same committed set under `k3s/weekly/` and that Velero ran the weekly Schedule rather than the daily
+one.
 
-**Nothing before this counts as proven.** Run
-[§C of the restore runbook](03-restore-runbook.md#c--the-restore-test) on a throwaway VM, then
-record the real timings in the runbook and set a reminder to repeat it every 3–6 months.
+```bash
+sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/k3s/weekly/"
+velero backup get -l velero.io/schedule-name=weekly
+```
+
+### 5.7 — Prove a restore works
+
+**Nothing before this counts as proven.** Everything up to here demonstrates that backups are
+*produced*; this is the only step that demonstrates they can be *used*.
+
+Before you start, confirm the recovery kit from 2.7 is real: this repo cloned somewhere that isn't
+`k3-master`, plus AWS CLI v2, `python3`, `tar`, `sha256sum`, `kubectl`, Velero CLI `v1.18.0` and
+ArgoCD access. The full prerequisite list is
+[03 — Before you start](03-restore-runbook.md#before-you-start).
+
+Then run [§C of the restore runbook](03-restore-runbook.md#c--the-restore-test) on a throwaway VM.
+It ends with four things written down, and the writing-down is the deliverable:
+
+1. **The real timings per phase.** Total wall-clock time *is* the RTO — replace the estimate in
+   [03](03-restore-runbook.md) and settle 1.7's assumption with a measured number.
+2. **Everything that didn't match the runbook**, fixed in the runbook rather than remembered.
+3. **Whether the monitoring volumes came back usable**, and therefore whether Prometheus/Loki/MinIO
+   history is accepted as best-effort or needs an application-native export
+   ([gap 7](05-gaps-and-open-questions.md#7-application-consistency-of-the-monitoring-volumes)).
+4. **The date, and the next due date** — every 3–6 months, and after any K3s or Velero upgrade.
+
+Paste the results under *Prove a restore works* in [ISSUES-TRACKER](ISSUES-TRACKER.md) and set the
+reminder before you tear
+the VM down. A restore test nobody scheduled a repeat for decays into a one-off anecdote.
 
 ---
 
@@ -866,7 +1174,10 @@ Nothing in stages 1–3 modifies K3s, so undoing means "remove what we added."
 
 | Stage | How to undo |
 |-------|-------------|
-| 5.1 | Disable `velero-backup-check.timer`, remove its service/timer/script and `velero-monitor.env`, then `daemon-reload` |
+| 5.4 | `kubectl -n monitoring delete prometheusrule k3s-backup-host` |
+| 5.3 | Disable `velero-backup-check.timer`, remove its service/timer/script, `velero-monitor.env` and `/var/lib/k3s-backup/`, then `daemon-reload` |
+| 5.2 | Blank `HEARTBEAT_URL` in `backup.env`, and pause or delete the external checks |
+| 4 | `velero uninstall` (leaves the bucket data untouched), then `kubectl delete schedule daily weekly` first if you want them gone from the cluster's history |
 | 3.8 | `sudo systemctl disable --now k3s-backup.timer`, `sudo rm /etc/systemd/system/k3s-backup.*`, `daemon-reload` |
 | 3.2–3.6 | `sudo rm -f /usr/local/sbin/k3s-server-backup.sh; sudo rm -rf /var/backups/k3s` |
 | 3.1 | `sudo rm -rf /etc/k3s-backup`, then delete the Job 1 access key |
@@ -890,7 +1201,10 @@ because the script never writes to it.
 
 | Not covered | Until |
 |-------------|-------|
-| A missed backup being noticed | The heartbeat channel is chosen and wired (5.1) |
-| Any proof a restore works | The restore test is run (5.3) |
-| RPO/RTO being agreed rather than assumed | Someone signs off [02 §1](02-backup-strategy.md#1-two-numbers-to-agree-on-first--still-open) |
+| A missed backup being noticed | Both dead-man checks exist and are wired (5.1–5.3) |
+| Knowing the alerts work at all | Each one has been broken on purpose (5.5) |
+| A full root filesystem being noticed | The disk rule is applied (5.4) |
+| Any proof a restore works | The restore test is run (5.7) |
+| RPO/RTO being agreed rather than assumed | Someone signs off 1.7 / [02 §1](02-backup-strategy.md#1-two-numbers-to-agree-on-first--still-open) |
+| A restore being possible without one specific person | 2.7 is filled in with two names |
 | A fallback if a restore itself goes wrong | Nothing. On-premise, no hosting-provider snapshot, nothing behind the S3 bucket |

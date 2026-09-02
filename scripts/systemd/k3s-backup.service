@@ -10,6 +10,7 @@ Requires=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/k3s-backup/backup.env
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 ExecStart=/usr/local/sbin/k3s-server-backup.sh
 
 # Never compete with the control plane for CPU or disk.

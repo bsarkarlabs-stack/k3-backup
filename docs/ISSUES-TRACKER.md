@@ -14,7 +14,7 @@ an issue is answered, we mark it done and move to the next one.
 ### 1. [#9](../../../issues/9) — Phase 1: Validate
 **Priority: Do this first — everything else depends on it**
 
-Commands: [07 stage 1](07-setup.md#stage-1--validate-the-server).
+Commands: [07 steps 1.1–1.6](07-setup.md#stage-1--validate-the-server).
 
 - Run `k3s-backup-preflight.sh --no-aws` and get a READY result
 - Confirm hostname, K3s version, service enabled, ≥5 GB free, `etcd-snapshot ls` still disabled
@@ -39,7 +39,7 @@ The design assumes we can lose up to **24 hours** of cluster state (RPO) and tha
 
 [02 §1](02-backup-strategy.md#1-two-numbers-to-agree-on-first--still-open) lists exactly what
 changes for each possible answer, so this is cheap to revisit — but it should be signed off rather
-than assumed.
+than assumed. The step: [07 step 1.7](07-setup.md#17--agree-an-rpo-and-an-rto-decision).
 
 **Answer / Output:**
 ```
@@ -53,7 +53,7 @@ Signed off by / date:
 ### 3. [#10](../../../issues/10) — Phase 2: Job 1, the K3s server backup
 **Priority: Highest**
 
-Commands: [07 stages 2–3](07-setup.md#stage-2--create-the-bucket-and-two-scoped-workload-credentials).
+Commands: [07 steps 2.1–3.8](07-setup.md#stage-2--create-the-bucket-and-two-scoped-workload-credentials).
 
 - Bucket: public access blocked, versioning on, **default SSE-S3**, HTTPS-only bucket policy
 - Six lifecycle rules: Job 1 current expiry, noncurrent-only expiry for `velero/` and releases,
@@ -76,7 +76,7 @@ Commands: [07 stages 2–3](07-setup.md#stage-2--create-the-bucket-and-two-scope
 ### 4. [#11](../../../issues/11) — Phase 3: Job 2, Velero
 **Priority: Highest — this is half the design and currently doesn't exist at all**
 
-Commands: [07 stage 4](07-setup.md#stage-4--deploy-job-2-velero).
+Commands: [07 steps 4.1–4.6](07-setup.md#stage-4--deploy-job-2-velero).
 
 - Find K3s's kubelet root **before** trusting anything
 - Install Velero CLI `v1.18.0`; run the installer with AWS plugin `v1.14.1`, verified
@@ -87,7 +87,8 @@ Commands: [07 stage 4](07-setup.md#stage-4--deploy-job-2-velero).
   list all six monitoring PVCs under *Pod Volume Backups*. An empty list is a silent total failure
   that still reports success
 - Confirm the `argocd` namespace backup contains its Secrets and Applications (retires #20/#1)
-- One object restore and one controller-aware PVC restore with ArgoCD suspended
+- One object restore into a scratch namespace ([07 step 4.5](07-setup.md#45--prove-one-narrow-restore-local)).
+  Do **not** delete a production PVC during setup — that proof belongs in the restore test
 - After a week, confirm old backups actually expire (proves the `velero/` delete permission)
 
 **Answer / Output:**
@@ -111,7 +112,9 @@ Options for #1/#2: a hosted dead-man's switch (healthchecks.io / Cronitor); AWS 
 on S3 `ObjectCreated` + a CloudWatch alarm treating missing data as breaching; or an Alertmanager
 hosted outside this cluster.
 
-Then **test all four by deliberately breaking them.**
+Commands: [07 steps 5.1–5.4](07-setup.md#51--choose-the-two-dead-man-checks-local). Then **test all
+four by deliberately breaking them** —
+[07 step 5.5](07-setup.md#55--break-every-alert-on-purpose).
 
 **Answer / Output:**
 ```
@@ -121,6 +124,7 @@ VELERO_HEARTBEAT_URL set:           yes / no
 Alert 1 tested by breaking it:      yes / no
 Alert 2 tested:                     yes / no
 Alert 3 tested:                     yes / no
+Alert 4 (disk) tested:              yes / no
 ```
 
 ---
@@ -128,7 +132,8 @@ Alert 3 tested:                     yes / no
 ### 6. [#12](../../../issues/12) — Phase 5: Prove a restore works
 **Priority: Medium — turns "hope" into "proof". Nothing before this counts as proven**
 
-Procedure: [03 §C](03-restore-runbook.md#c--the-restore-test).
+Procedure: [03 §C](03-restore-runbook.md#c--the-restore-test), driven from
+[07 step 5.7](07-setup.md#57--prove-a-restore-works).
 
 - Throwaway Ubuntu VM matching `k3-master`, on a different address
 - Install K3s from `k3s-release/` in the bucket rather than `get.k3s.io` — proves the fallback
@@ -172,11 +177,13 @@ backs it up** and every restore returns a site with no valid certificate. Comman
 
 There is deliberately no stored restore credential; restores use a normal AWS admin/SSO login. That
 only works if the access isn't a single point of failure.
+Commands: [07 step 2.7](07-setup.md#27--write-down-who-can-restore-local).
 
 **Answer / Output:**
 ```
 People who can read s3://k3-master-dr:
 Bucket name + region recorded outside AWS:   yes / no
+Recovery kit (this repo) cloned off k3-master: yes / no
 Who rotates the Job 1 and Velero keys, and how often:
 ```
 
@@ -238,7 +245,8 @@ including its Secrets, Applications and AppProjects, and Git holds the app defin
 
 What's left: confirm every ArgoCD App is defined in Git (anything hand-made comes back from Velero,
 not Git), verify the Velero backup really contains ArgoCD's Secrets and Applications as part of #11,
-and write down which Git repos/logins ArgoCD depends on.
+and write down which Git repos/logins ArgoCD depends on. All three happen in
+[07 step 4.4](07-setup.md#44--confirm-object-coverage-including-argocd-local).
 
 **Answer / Output:**
 ```

@@ -6,6 +6,7 @@ Requires=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/k3s-backup/velero-monitor.env
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
 ExecStart=/usr/local/sbin/check-last-velero-backup.sh
 # Holds the UID of the last backup reported, so a skipped schedule cannot be
 # masked by re-reporting yesterday's still-fresh backup.

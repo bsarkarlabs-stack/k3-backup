@@ -384,7 +384,7 @@ velero restore describe <restore-name> --details
 
 Expect this to take a while for the ~5.5 GB Prometheus volume. In `restore describe --details` you
 must see a **Pod Volume Restores** section listing six volumes. If that section is empty, no data
-moved — see the box above, and [gap 6](05-gaps-and-open-questions.md).
+moved — see the box above, and [gap 6](05-gaps-and-open-questions.md#6-whether-veleros-node-agent-can-actually-read-our-volumes).
 
 **Check — volume size, not volume existence:**
 
@@ -436,7 +436,14 @@ kubectl -n velero patch backupstoragelocation default \
 
 kubectl apply -f scripts/velero/schedule-daily.yaml
 kubectl apply -f scripts/velero/schedule-weekly.yaml
+
+# Job 1 and the Velero verifier are not in the archive — reinstall them from
+# this repo before trusting the rebuilt host to back itself up. Follow
+# [07 steps 3.1–3.2 and 5.2–5.3](07-setup.md#31--write-the-config-node): write
+# backup.env, copy the script and units, set HEARTBEAT_URL, install the
+# verifier. Then:
 sudo systemctl enable --now k3s-backup.timer
+sudo systemctl enable --now velero-backup-check.timer
 ```
 
 Then:
@@ -446,7 +453,7 @@ Then:
   logs `heartbeat sent`. A restored server whose backups are silently broken is worse than no
   restore.
 - Confirm the **next scheduled run of both jobs** actually lands in S3.
-- **Rotate the backup credential** if the old server is compromised or unaccounted for.
+- **Rotate both workload credentials** if the old server is compromised or unaccounted for.
 - **Write down how long this took.** That number is our real RTO — everything before this point is
   an estimate.
 
@@ -559,8 +566,11 @@ but is **not** this. This needs a machine that boots.
    it here is what makes it recur:
 
    ```bash
+   # PREFIX and ARCHIVE come from §A step 1 (newest COMPLETE.json, then the
+   # filename recorded in MANIFEST.json).
    aws s3 cp "s3://$BUCKET/$PREFIX/" . --recursive
    # verify the COMPLETE.json -> MANIFEST.json -> archive chain, as in §A step 1
+   ARCHIVE=$(python3 -c 'import json;print(json.load(open("MANIFEST.json"))["archive"]["filename"])')
    tar -tzf "$ARCHIVE" | head        # MANIFEST.json state.db fs-root/ host-facts/
    ```
 

@@ -32,7 +32,8 @@ wrong answer otherwise. Without them, "daily" is arbitrary.
 changes for each answer, so this is cheap to revisit — but it should be a decision on the record,
 not a default nobody examined.
 
-**To close:** get the two numbers agreed, write them into 02 §1, and mark them signed off.
+**To close:** [07 step 1.7](07-setup.md#17--agree-an-rpo-and-an-rto-decision) — get the two numbers
+agreed, write them into 02 §1, and mark them signed off.
 
 ---
 
@@ -54,7 +55,9 @@ Three realistic channels:
 | AWS-native: EventBridge rule on S3 `ObjectCreated` under `k3s/daily/` → CloudWatch alarm treating missing data as breaching | ~1 hour | No third party. More moving parts, and it watches the bucket rather than the script |
 | An Alertmanager or push gateway hosted **outside** this cluster | varies | Only worth it if one already exists |
 
-**To close:** create two checks, set both URLs, and prove each fires when only its own timer stops.
+**To close:** [07 steps 5.1–5.3](07-setup.md#51--choose-the-two-dead-man-checks-local) create the two
+checks and set both URLs; [07 step 5.5](07-setup.md#55--break-every-alert-on-purpose) proves each one
+fires when only its own timer stops.
 
 ---
 
@@ -65,8 +68,9 @@ unproven, and the ~2 hour RTO in it is a guess.
 
 *A backup that has never been restored is a hope, not a plan.*
 
-**To close:** [03 §C](03-restore-runbook.md#c--the-restore-test) on a throwaway VM, then correct the
-runbook to match what actually happened rather than what we expected.
+**To close:** [03 §C](03-restore-runbook.md#c--the-restore-test) on a throwaway VM, driven from
+[07 step 5.7](07-setup.md#57--prove-a-restore-works), then correct the runbook to match what
+actually happened rather than what we expected.
 
 ---
 
@@ -97,12 +101,14 @@ SSO login, which is better than keeping a permanent read key in a vault on a rot
 That trade only holds if the access itself is not a single point of failure. Right now nobody has
 confirmed it isn't.
 
-**To close, and it takes five minutes:**
+**To close, and it takes five minutes** —
+[07 step 2.7](07-setup.md#27--write-down-who-can-restore-local):
 
 - Name **at least two people** who can log into AWS and read `s3://k3-master-dr`.
 - Write the **bucket name and region** somewhere that survives losing AWS access to that account —
   this repo counts, and it already says both.
 - Name the owner and rotation interval for both workload keys (Job 1 and Velero).
+- Record where the recovery kit (this repo, cloned off `k3-master`) actually lives.
 
 ---
 
@@ -120,14 +126,16 @@ through a hostPath into the kubelet root directory, and K3s does not always use 
 nothing** — the result looks like an empty backup rather than an error, and the backup is still
 marked `Completed`.
 
-**To close:** after installing Velero, run a backup and check it directly:
+**To close:** [07 step 4.3](07-setup.md#43--prove-the-node-agent-actually-reads-the-volumes-local) —
+after installing Velero, run a backup and check it directly:
 
 ```bash
 velero backup describe <name> --details      # all six PVCs must appear under "Pod Volume Backups"
 ```
 
-An empty *Pod Volume Backups* section is the failure. Then prove it the other way with the
-controller-aware PVC procedure in restore runbook §B.
+An empty *Pod Volume Backups* section is the failure. Volume copy-back is proven later by the
+controller-aware PVC procedure in restore runbook §B, on the restore-test VM — not by deleting a
+live production claim during setup.
 
 **Then make it permanent:** this exact failure is why
 [02 §7 alert 3](02-backup-strategy.md#7-knowing-it-works) alerts on the *number of pod volumes* in
@@ -145,9 +153,10 @@ moments.
 - **Prometheus** normally replays its WAL and recovers cleanly.
 - **MinIO** and **Loki's boltdb-shipper** are less forgiving.
 
-**To close:** decide whether monitoring history is explicitly best-effort. If it is required data,
-add and test an application-native export or quiesce hook; a successful live FSB restore alone
-does not establish consistency.
+**To close:** decide whether monitoring history is explicitly best-effort, and record the decision
+during [07 step 5.7](07-setup.md#57--prove-a-restore-works) when you can see what actually came
+back. If it is required data, add and test an application-native export or quiesce hook; a
+successful live FSB restore alone does not establish consistency.
 
 ---
 

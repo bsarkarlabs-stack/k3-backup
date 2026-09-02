@@ -18,7 +18,8 @@ from Git).
 ## Before you run anything
 
 ```bash
-sudo /usr/local/sbin/k3s-backup-preflight.sh
+sudo /usr/local/sbin/k3s-backup-preflight.sh --no-aws   # before the bucket exists
+sudo /usr/local/sbin/k3s-backup-preflight.sh            # after Job 1's credential is in place
 ```
 
 [`scripts/k3s-backup-preflight.sh`](scripts/k3s-backup-preflight.sh) checks everything the backup
@@ -62,7 +63,7 @@ depend on that release still being downloadable.
 | 04 | [Implementation TODO](docs/04-implementation-todo.md) | The build plan, in five phases. Matches our GitHub Issues. |
 | 05 | [Gaps & Open Questions](docs/05-gaps-and-open-questions.md) | What we still don't know or haven't decided. Read this first if something is unclear. |
 | 06 | [Developer Access](docs/06-developer-access.md) | How a new developer gets permission to clone and push to this repo. |
-| 07 | [Setup](docs/07-setup.md) | The commands to actually build it, five stages, with a check after each one. |
+| 07 | [Setup](docs/07-setup.md) | The commands to actually build it: five stages, 35 numbered steps, each with a check before you move on. Starts with an index of every step. |
 | — | [Issues Tracker](docs/ISSUES-TRACKER.md) | Every open issue in one place, with a box to paste the answer into as each is resolved. |
 
 ## Where things stand right now

@@ -174,7 +174,7 @@ identity_fingerprint() {
   find "$K3S_SERVER_DIR/token" "$K3S_SERVER_DIR/tls" "$K3S_SERVER_DIR/cred" \
     -xdev \( -type f -o -type l \) -print0 \
     | sort -z \
-    | xargs -0 sha256sum \
+    | xargs -0 -r sha256sum \
     | sha256sum \
     | awk '{print $1}'
 }

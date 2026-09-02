@@ -38,10 +38,8 @@ token
 *.db-shm
 *.sha256
 
-# Environment / local overrides
-.env
-.env.*
-*.local
+# Local verification scratch — never commit
+.tmp-verify/
 
 # Editor / OS / tooling noise
 .vscode/
