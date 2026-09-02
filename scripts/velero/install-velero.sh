@@ -29,6 +29,19 @@ set -euo pipefail
 # problem. Check compatibility before bumping either:
 # https://github.com/vmware-tanzu/velero-plugin-for-aws#compatibility
 VELERO_PLUGIN_VERSION=${VELERO_PLUGIN_VERSION:-v1.10.0}
+VELERO_VERSION=${VELERO_VERSION:-v1.15.0}
+
+# `velero install` deploys velero/velero:<CLI version> — the server version is
+# whatever CLI happens to be on the machine running this. Pinning the plugin
+# but not the CLI is half a pin: the next engineer installs from a different
+# laptop and gets a different server. Fail loudly instead.
+have=$(velero version --client-only 2>/dev/null | awk '/Version:/{print $2; exit}')
+if [ "$have" != "$VELERO_VERSION" ]; then
+  echo "velero CLI is '${have:-unknown}', this install is pinned to $VELERO_VERSION." >&2
+  echo "Install the matching CLI, or set VELERO_VERSION deliberately after" >&2
+  echo "checking plugin compatibility. Do not just override it to continue." >&2
+  exit 1
+fi
 
 command -v velero >/dev/null || {
   echo "velero CLI not found — install it first:" >&2

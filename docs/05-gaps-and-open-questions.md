@@ -108,9 +108,17 @@ confirmed it isn't.
 
 ## 6. Whether Velero's node-agent can actually read our volumes
 
-File-system backup reads pod volumes through a hostPath into the kubelet root directory. K3s does
-not always use the stock `/var/lib/kubelet`. If the path doesn't match, **the node-agent starts
-cleanly and backs up nothing** — the result looks like an empty backup rather than an error.
+> **First, the blunter fact this gap can obscure: Velero is not installed at all yet.** Phrased as
+> "can the node-agent read our volumes", this reads like Job 2 exists and might be misconfigured.
+> It doesn't. **Today, nothing backs up PVC data**, and an accidental `kubectl delete pvc` is
+> permanent — see [02 §5](02-backup-strategy.md#5-job-2--velero). That is a bigger exposure than
+> everything else on this page combined, and installing Velero is what closes it.
+
+Once it *is* installed, this is the failure mode to watch for. File-system backup reads pod volumes
+through a hostPath into the kubelet root directory, and K3s does not always use the stock
+`/var/lib/kubelet`. If the path doesn't match, **the node-agent starts cleanly and backs up
+nothing** — the result looks like an empty backup rather than an error, and the backup is still
+marked `Completed`.
 
 **To close:** after installing Velero, run a backup and check it directly:
 
@@ -120,6 +128,11 @@ velero backup describe <name> --details      # all six PVCs must appear under "P
 
 An empty *Pod Volume Backups* section is the failure. Then prove it the other way, by restoring one
 PVC into a scratch namespace.
+
+**Then make it permanent:** this exact failure is why
+[02 §7 alert 3](02-backup-strategy.md#7-knowing-it-works) alerts on the *number of pod volumes* in
+the last backup rather than on its status. Checking once at install proves it worked once; the alert
+is what notices the day a K3s upgrade moves the kubelet root.
 
 ---
 

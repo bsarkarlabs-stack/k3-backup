@@ -78,23 +78,32 @@ this plan covers either.
 - [ ] Confirm cluster-scoped resources are in the backup (CRDs, ClusterRoles, StorageClass)
 - [ ] Confirm the `argocd` namespace backup contains its Secrets and Applications — this is what
       retires the separate ArgoCD export ([#20](../../../issues/20), [#1](../../../issues/1))
-- [ ] One small restore into a scratch namespace. **Don't just trust a green checkmark**
+- [ ] One small restore into a scratch namespace. **Don't just trust a green checkmark** — and
+      restore the *workload*, not just the PVC. Velero only writes volume data when it creates the
+      pod ([03 §B](03-restore-runbook.md#one-pvcs-data))
 - [ ] After a week, confirm old backups actually expire — proves the `velero/` delete permission is
       right
+- [ ] Pin the Velero CLI version to match `install-velero.sh` and record both it and the plugin
+      version — `velero install` deploys `velero/velero:<CLI version>`, so an unpinned CLI silently
+      decides the server version
 
 ---
 
 ## Phase 4 — Monitor
 
-Three alerts, and only three ([02 §7](02-backup-strategy.md#7-knowing-it-works)).
+Four alerts, and only four ([02 §7](02-backup-strategy.md#7-knowing-it-works)).
 
 - [ ] **Decide where the heartbeat reports to** — hosted dead-man's switch, AWS EventBridge +
       CloudWatch, or an off-cluster Alertmanager. This is the only alert that survives the server
       dying ([#2](../../../issues/2))
 - [ ] Set `HEARTBEAT_URL` in `backup.env`, run the job by hand, confirm `heartbeat sent` in the log
 - [ ] Alert on `velero_backup_last_successful_timestamp` going stale (26 h)
+- [ ] **Alert on the pod-volume count in the last Velero backup dropping below the number of PVCs.**
+      A backup that captured zero volumes is still `Completed`, so the status alert above would stay
+      green through exactly the failure [gap 6](05-gaps-and-open-questions.md) predicts
 - [ ] Alert on root disk free space under 10%
-- [ ] **Test all three by deliberately breaking them.** An untested alert is a decoration
+- [ ] **Test all four by deliberately breaking them.** An untested alert is a decoration. For the
+      volume-count one, scale a workload to zero and confirm the next backup trips it
 - [ ] Watch the first two or three runs by hand, then stop watching — the alerts are the plan
 
 ---

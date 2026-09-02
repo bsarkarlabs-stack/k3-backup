@@ -102,7 +102,7 @@ Inside the archive:
 ```text
 ./MANIFEST.json
 ./state.db          the datastore — placed by hand at restore time
-./root/…            extract onto / : token, tls/, cred/, manifests/,
+./fs-root/…         cp -a fs-root/. /  : token, tls/, cred/, manifests/,
                     /etc/rancher/k3s, /etc/systemd/system/k3s.service
 ./host-facts/…      plain text. Reference for rebuilding the host. Never extracted onto /
 ```
@@ -142,7 +142,11 @@ Inside the archive:
 |---------|-----|
 | `s3:ListBucket`, `s3:GetBucketLocation` | the bucket |
 | `s3:PutObject`, `s3:AbortMultipartUpload`, `s3:ListMultipartUploadParts` | `k3s/*`, `k3s-release/*`, `_preflight/*` |
-| `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`, `s3:AbortMultipartUpload` | `velero/*` **only** |
+| `s3:PutObject`, `s3:GetObject`, `s3:DeleteObject`, `s3:AbortMultipartUpload`, `s3:ListMultipartUploadParts` | `velero/*` **only** |
+
+> This table must match [07 §2.5](07-setup.md) exactly. A summary that under-states the policy is an
+> invitation to "tighten" the real one to match it — and Velero's PVC uploads are multipart, so
+> dropping `ListMultipartUploadParts` from `velero/*` breaks Job 2 for every volume over 8 MB.
 
 Read the gaps in that table, because they are the point:
 
@@ -171,12 +175,12 @@ Everything in this table is load-bearing except the last row.
 | What | How it's captured | Why a restore fails without it |
 |------|-------------------|--------------------------------|
 | `server/db/state.db` | SQLite **online backup API** via Python, on a read-only connection → one consistent file | It *is* the cluster state. A plain `cp` of a live WAL database can copy a torn page and restore into a corrupt cluster. |
-| `server/tls/` | in `root/` | The cluster CA and every cert issued from it. |
-| `server/cred/` | in `root/` | Join credentials + the secret-encryption key if that's enabled. |
-| `server/token` | in `root/`, permissions preserved (`0600 root:root`) | K3s unlocks bootstrap data in the datastore with it. |
-| `server/manifests/` | in `root/` | The bundled add-ons — including `traefik-helmchartconfig.yaml`, which someone edited by hand and which cannot be regenerated. |
-| `/etc/rancher/k3s/` | in `root/` | `registries.yaml` holds our registry mirrors and pull credentials — images won't pull without it. |
-| `/etc/systemd/system/k3s.service` (+ `.env`) | in `root/` | The start flags: `--tls-san`, disabled components, node labels. Reinstalling with defaults silently produces a *different* cluster. |
+| `server/tls/` | in `fs-root/` | The cluster CA and every cert issued from it. |
+| `server/cred/` | in `fs-root/` | Join credentials + the secret-encryption key if that's enabled. |
+| `server/token` | in `fs-root/`, permissions preserved (`0600 root:root`) | K3s unlocks bootstrap data in the datastore with it. |
+| `server/manifests/` | in `fs-root/` | The bundled add-ons — including `traefik-helmchartconfig.yaml`, which someone edited by hand and which cannot be regenerated. |
+| `/etc/rancher/k3s/` | in `fs-root/` | `registries.yaml` holds our registry mirrors and pull credentials — images won't pull without it. |
+| `/etc/systemd/system/k3s.service` (+ `.env`) | in `fs-root/` | The start flags: `--tls-san`, disabled components, node labels. Reinstalling with defaults silently produces a *different* cluster. |
 | `MANIFEST.json` | generated each run | The exact K3s version and start command. Nothing else in the backup records them: `uname` is the kernel, and K3s isn't a dpkg package. Restoring at the wrong version is the most common self-inflicted restore failure. |
 | Host fact sheet | plain text in `host-facts/` | *Optional* (`INCLUDE_HOST_FACTS=0` to skip). Addresses, routes, firewall rules, timezone, disk layout, package list, netplan. ~50 KB. |
 
@@ -305,18 +309,40 @@ volumes, plus ~70 MB per K3s version. Single-digit dollars a month.
 
 ## 7. Knowing it works
 
-**A backup nobody watches fails silently for months.** Three alerts, and only three.
+**A backup nobody watches fails silently for months.** Four alerts, and only four.
 
 | # | Alert | Where it runs | Threshold |
 |---|-------|---------------|-----------|
 | 1 | **No Job 1 backup arrived** | Off-server dead-man's switch | 26 hours |
 | 2 | Velero's last backup isn't `Completed` | Prometheus/Alertmanager, in-cluster | 26 hours stale |
-| 3 | Root disk free space low | Prometheus/Alertmanager, in-cluster | under 10% |
+| 3 | **Velero's last backup contains fewer than 6 pod volumes** | Prometheus/Alertmanager, in-cluster | any run below 6 |
+| 4 | Root disk free space low | Prometheus/Alertmanager, in-cluster | under 10% |
+
+### Alert 3 exists because `Completed` is not the same as "it backed something up"
+
+This is the failure this design predicts about itself: if the node-agent cannot reach the kubelet
+root, it backs up **nothing** and the backup still finishes `Completed`
+([gap 6](05-gaps-and-open-questions.md)). Alert 2 would stay green through it, every night, until a
+restore discovered the truth.
+
+So the assertion has to be about **volume count, not backup status**. Each volume the node-agent
+handles produces a `PodVolumeBackup` object:
+
+```bash
+# expect 6 — Prometheus, Loki, MinIO, Loki write, Loki backend, Grafana/Alertmanager
+kubectl -n velero get podvolumebackups \
+  -l velero.io/backup-name="$(velero backup get -o name | head -1 | cut -d/ -f2)" \
+  --field-selector status.phase=Completed --no-headers | wc -l
+```
+
+Alert if that number drops below the number of PVCs the cluster actually has. **Update the expected
+count whenever a PVC is added** — or better, compare it against `kubectl get pvc -A` at alert time
+so it maintains itself.
 
 ### Alert 1 is the important one, because it survives the server
 
-Alerts 2 and 3 run inside the cluster we are trying to protect. If `k3-master` dies, they die with
-it — and the failure that matters most goes unreported. Alert 1 has to live somewhere else.
+Alerts 2, 3 and 4 run inside the cluster we are trying to protect. If `k3-master` dies, they die
+with it — and the failure that matters most goes unreported. Alert 1 has to live somewhere else.
 
 It works as a **heartbeat**: the backup script pings a URL, and something outside this server raises
 the alarm when the ping stops arriving. Critically, the script pings *after* it has confirmed the
@@ -393,7 +419,7 @@ A real test is:
 ```text
 fresh Ubuntu VM
    → install the matching K3s (from k3s-release/ if needed)
-   → restore Job 1: root/, state.db, no -wal/-shm
+   → restore Job 1: fs-root/, state.db, no -wal/-shm
    → cluster starts, node Ready
    → install Velero read-only, restore PVC data
    → Prometheus answers a query over PRE-INCIDENT data

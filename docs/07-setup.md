@@ -560,7 +560,7 @@ during an outage.
 
 ```bash
 tar -xzf k3s-*.tar.gz
-ls -la root/var/lib/rancher/k3s/server/ root/etc/rancher/k3s/
+ls -la fs-root/var/lib/rancher/k3s/server/ fs-root/etc/rancher/k3s/
 cat host-facts/README.txt
 
 # the datastore must be a valid, complete SQLite database
@@ -573,7 +573,7 @@ PY
 ```
 
 **Check:** `integrity_check: ok` and a real, non-zero row count — that count is the proof this is a
-snapshot of the live cluster and not an empty shell. Under `root/` you should find `tls/`, `cred/`,
+snapshot of the live cluster and not an empty shell. Under `fs-root/` you should find `tls/`, `cred/`,
 `token`, `manifests/`, `/etc/rancher/k3s` and `k3s.service`; compare the `tls/` and `cred/` listings
 against what you found in 1.3.
 
@@ -683,7 +683,7 @@ Also confirm, while you're here:
 
 ## Stage 5 — Monitoring and the restore test
 
-### 5.1 — Wire the three alerts
+### 5.1 — Wire the four alerts
 
 Design and thresholds are in [02 §7](02-backup-strategy.md#7-knowing-it-works). In short:
 
@@ -691,7 +691,19 @@ Design and thresholds are in [02 §7](02-backup-strategy.md#7-knowing-it-works).
 |---|-------|--------|
 | 1 | No Job 1 backup arrived in 26 h — **off-server heartbeat** | ⏳ channel undecided ([gap 2](05-gaps-and-open-questions.md#2-the-heartbeat-has-nowhere-to-report-to-yet)) |
 | 2 | Velero's last backup isn't `Completed` — `velero_backup_last_successful_timestamp`, in-cluster | to do |
-| 3 | Root disk free under 10% — in-cluster | to do |
+| 3 | **Fewer pod volumes in the last backup than the cluster has PVCs** — in-cluster | to do |
+| 4 | Root disk free under 10% — in-cluster | to do |
+
+Alert 3 is not a duplicate of alert 2. A Velero backup that captured **zero** volumes still finishes
+`Completed`, so alert 2 stays green through the exact failure
+[gap 6](05-gaps-and-open-questions.md) describes. Count the volumes, not the status:
+
+```bash
+LAST=$(velero backup get -o name | head -1 | cut -d/ -f2)
+kubectl -n velero get podvolumebackups -l velero.io/backup-name="$LAST" \
+  --field-selector status.phase=Completed --no-headers | wc -l
+kubectl get pvc -A --no-headers | wc -l        # the two numbers must match
+```
 
 Once the heartbeat channel is chosen, it's one line:
 
@@ -703,7 +715,7 @@ sudo systemctl start k3s-backup.service     # confirm "heartbeat sent" in the lo
 **Test each alert by deliberately breaking it.** An untested alert is a decoration. Stop the timer
 for a day, or point `HEARTBEAT_URL` at a dead endpoint, and confirm someone is actually told.
 
-Remember why alert 1 is the one that matters: alerts 2 and 3 run inside the cluster we're
+Remember why alert 1 is the one that matters: alerts 2, 3 and 4 run inside the cluster we're
 protecting, so they die with the server.
 
 ### 5.2 — Watch the first few runs `[node]`

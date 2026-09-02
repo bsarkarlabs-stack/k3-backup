@@ -99,13 +99,15 @@ Commands: [07 stage 4](07-setup.md#stage-4--deploy-job-2-velero).
 ### 5. [#2](../../../issues/2) — Phase 4: Alerting, and where the heartbeat reports to
 **Priority: Highest of the "medium" items — until this exists, a stopped backup is silent**
 
-Three alerts ([02 §7](02-backup-strategy.md#7-knowing-it-works)):
+Four alerts ([02 §7](02-backup-strategy.md#7-knowing-it-works)):
 
 1. **No Job 1 backup in 26 h** — an off-server heartbeat. **This is the only one that still works
    when `k3-master` is dead.** The script already pings `HEARTBEAT_URL` after verifying its objects
    landed in S3; the open question is *what receives it*
 2. Velero's `velero_backup_last_successful_timestamp` going stale — in-cluster
-3. Root disk free under 10% — in-cluster
+3. **Pod-volume count in the last Velero backup below the cluster's PVC count** — in-cluster. A
+   backup that captured nothing is still `Completed`, so #2 alone would never notice
+4. Root disk free under 10% — in-cluster
 
 Options for #1: a hosted dead-man's switch (healthchecks.io / Cronitor, ~5 minutes); AWS EventBridge
 on S3 `ObjectCreated` + a CloudWatch alarm treating missing data as breaching; or an Alertmanager
@@ -306,7 +308,7 @@ them.
 3. [#9](../../../issues/9) — the rest of the validation
 4. [#10](../../../issues/10) — bucket, credential, Job 1
 5. [#11](../../../issues/11) — **install Velero.** Until this exists, a deleted PVC is permanent
-6. [#2](../../../issues/2) — pick the heartbeat channel and wire all three alerts
+6. [#2](../../../issues/2) — pick the heartbeat channel and wire all four alerts
 7. [#12](../../../issues/12) — **test a restore.** Nothing before this counts as proven
 8. [#16](../../../issues/16), [#8](../../../issues/8), [#22](../../../issues/22),
    [#19](../../../issues/19), [#1](../../../issues/1), [#15](../../../issues/15) — the rest

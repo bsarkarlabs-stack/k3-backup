@@ -24,8 +24,12 @@
 #
 #   ./MANIFEST.json
 #   ./state.db          the datastore. Placed by hand at restore time, see below
-#   ./root/...          extract onto / — token, tls/, cred/, manifests/,
-#                       /etc/rancher/k3s, the k3s systemd unit
+#   ./fs-root/...       mirrors the real filesystem. Restore with
+#                         cp -a fs-root/. /
+#                       token, tls/, cred/, manifests/, /etc/rancher/k3s and the
+#                       k3s systemd unit. Named fs-root rather than root so that
+#                       an accidental `tar -xzf ... -C /` cannot quietly scatter
+#                       it through root's home directory.
 #   ./host-facts/...    plain text. Reference material for rebuilding the host.
 #                       Never extracted onto / — read it, apply what applies.
 #
@@ -212,7 +216,14 @@ try:
     row = dst.execute("PRAGMA integrity_check").fetchone()
     if not row or row[0] != "ok":
         raise SystemExit(f"integrity_check on the snapshot returned: {row}")
-    rows = dst.execute("SELECT count(*) FROM kine").fetchone()[0]
+    # integrity_check is the load-bearing assertion. The row count is a useful
+    # "is this actually a cluster" sanity signal, but a schema surprise must not
+    # discard a snapshot that already verified — nor skip the heartbeat and turn
+    # a curiosity into a reported backup outage.
+    try:
+        rows = dst.execute("SELECT count(*) FROM kine").fetchone()[0]
+    except sqlite3.Error as exc:
+        rows = f"unknown ({exc})"
     print(f"     snapshot ok ({mode}), integrity_check=ok, kine rows={rows}")
 finally:
     dst.close()
@@ -226,8 +237,12 @@ PY
 # --------------------------------------------------------------------------
 # 2 — Cluster identity and config  (SENSITIVE)
 #
-# Staged under payload/root/ mirroring the real filesystem, so a restore is
-# one copy: cp -a root/. /
+# Staged under payload/fs-root/ mirroring the real filesystem, so a restore is
+# one copy: cp -a fs-root/. /
+#
+# Deliberately not called root/: an operator who reaches for
+# `tar -xzf ... -C /` under pressure would then write root's home directory
+# instead of the paths they meant, and get a silently incomplete restore.
 #
 # These files only ever restore together: K3s keeps the cluster's bootstrap
 # data inside the datastore, encrypted with the server token, so the token,
@@ -235,7 +250,7 @@ PY
 # --------------------------------------------------------------------------
 
 backup_identity() {
-  log "2/4  cluster identity + config -> root/"
+  log "2/4  cluster identity + config -> fs-root/"
 
   local -a paths=(
     var/lib/rancher/k3s/server/tls
@@ -253,11 +268,11 @@ backup_identity() {
     [ -e "/$p" ] || die "expected /$p to exist — refusing to write an incomplete backup"
   done
 
-  mkdir -p "$PAYLOAD/root"
-  chmod 0700 "$PAYLOAD/root"
+  mkdir -p "$PAYLOAD/fs-root"
+  chmod 0700 "$PAYLOAD/fs-root"
   # tar-to-tar rather than cp, so modes, owners and symlinks survive exactly.
   run_tar --warning=no-file-changed --numeric-owner -cf - -C / "${paths[@]}" \
-    | tar -xpf - -C "$PAYLOAD/root" \
+    | tar -xpf - -C "$PAYLOAD/fs-root" \
     || die "staging the cluster identity failed"
 }
 
@@ -383,9 +398,10 @@ doc = {
     # during an outage, not necessarily in a UTF-8 locale.
     "contents": {
         "state.db": "SQLite online backup of the K3s datastore",
-        "root/": "extract onto / : token, tls/, cred/, manifests/, /etc/rancher/k3s, systemd unit",
+        "fs-root/": "restore with: cp -a fs-root/. /  -- token, tls/, cred/, manifests/, /etc/rancher/k3s, systemd unit",
         "host-facts/": "plain-text reference for rebuilding the host. Never extract onto /",
     },
+    "restore_hint": "cp -a fs-root/. / ; install -m 0600 state.db /var/lib/rancher/k3s/server/db/ ; rm -f .../state.db-wal .../state.db-shm",
 }
 
 with open(sys.argv[1], "w") as fh:
@@ -509,7 +525,7 @@ matching release is no longer downloadable from get.k3s.io.
   aws s3 cp s3://$S3_BUCKET/$key ./k3s
   sudo install -m 0755 -o root -g root ./k3s /usr/local/bin/k3s
   for c in kubectl crictl ctr; do sudo ln -sf /usr/local/bin/k3s /usr/local/bin/\$c; done
-  # then restore root/etc/systemd/system/k3s.service from the backup archive
+  # then restore fs-root/etc/systemd/system/k3s.service from the backup archive
   sudo systemctl daemon-reload
 
 install.sh is not required — it only writes the systemd unit, and the unit is
