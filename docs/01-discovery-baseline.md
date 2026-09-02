@@ -136,7 +136,7 @@ Error: etcd datastore disabled
 
 **In plain words: the normal `k3s etcd-snapshot` backup command will not work on this server**,
 because we're using SQLite instead of etcd. We need a different backup method (see
-[Backup Strategy §3](02-backup-strategy.md#3-job-1--the-k3s-server-backup)).
+[Backup Strategy §4](02-backup-strategy.md#4-job-1--the-k3s-server-backup)).
 
 ### No external database either
 
@@ -152,7 +152,7 @@ mid-write can capture a torn page.
 
 The fix is not to copy all three files. It's to use SQLite's **online backup API**, which reads a
 consistent view of the database and folds the WAL into a single output file. That's what
-[Job 1](02-backup-strategy.md#3-job-1--the-k3s-server-backup) does, and it's why a restore places
+[Job 1](02-backup-strategy.md#4-job-1--the-k3s-server-backup) does, and it's why a restore places
 only `state.db` and deletes any `-wal`/`-shm` left behind.
 
 ---
@@ -361,7 +361,7 @@ Restore ever tested      NEVER
 The missing `sqlite3` tool matters: doing a safe backup of a live SQLite database requires using
 its proper "backup" feature — not just copying the file. We do this using Python's built-in
 `sqlite3` module instead (same feature), so nothing new needs installing. See
-[Backup Strategy §3](02-backup-strategy.md#3-job-1--the-k3s-server-backup).
+[Backup Strategy §4](02-backup-strategy.md#4-job-1--the-k3s-server-backup).
 
 ---
 
@@ -403,8 +403,8 @@ on-premise-style server with no automatic hosting-level snapshot feature availab
 | Existing scheduled backups | ✅ Checked — there are none |
 | Required tools installed | ✅ Fully checked |
 | **Who hosts this server** | ✅ Resolved — Datalix, on-premise style, no hosting-level snapshots |
-| **The server's network/firewall/login setup** | ✅ Captured automatically by Job 1 as `node-config.tar.gz` |
-| **List of installed system packages** | ✅ Same — `dpkg --get-selections` is in `node-config.tar.gz` |
+| **The server's network/firewall setup** | ✅ Captured automatically by Job 1 as plain text in `host-facts/` |
+| **List of installed system packages** | ✅ Same — `dpkg --get-selections` is in `host-facts/` |
 | **What's inside the `server/tls/` folder** | ⚠️ **Not checked file-by-file yet** |
 | **What's inside the `server/cred/` folder** | ⚠️ **Not checked file-by-file yet** |
 | **Where our HTTPS certificate actually comes from** | ⚠️ **Not confirmed yet — this is the blocking one** |

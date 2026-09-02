@@ -1,24 +1,75 @@
 # 05 — Gaps & Open Questions
 
-Things we **don't know for sure yet**. Don't assume an answer — each has a GitHub Issue.
+Things we **don't know for sure yet**, or haven't decided. Don't assume an answer — each has a
+GitHub Issue.
 
 The design itself is settled ([02 — Backup Strategy](02-backup-strategy.md)); what's below is what
 could still make that design wrong on this particular server.
 
 | # | Gap | Serious? | Blocks | Issue |
 |---|-----|----------|--------|-------|
-| 1 | Where Traefik's HTTPS certificates actually come from | **Blocking** | A clean restore — silently | [#4](../../../issues/4) |
-| 2 | Whether Velero's node-agent can actually read our volumes | **Blocking** | All PVC and single-object restores | [#11](../../../issues/11) |
+| 1 | RPO and RTO are not signed off | **Blocking** | Knowing whether "daily" is the right answer | [#3](../../../issues/3) |
+| 2 | The heartbeat has nowhere to report to yet | **Blocking** | A failed backup being noticed at all | [#2](../../../issues/2) |
 | 3 | Nothing has ever been restored | **Blocking** | Knowing any of this works | [#12](../../../issues/12) |
-| 4 | Crash-consistency of the Prometheus / Loki / MinIO volumes | High | Trusting a PVC restore | [#12](../../../issues/12) |
-| 5 | Is K3s encrypting Secrets inside its own database? | Medium | How loudly we flag `cred/` in the runbook | [#22](../../../issues/22) |
-| 6 | Does our "backup succeeded" signal go anywhere? | Medium | Alerting being real rather than decorative | [#22](../../../issues/22) |
-| 7 | Nobody owns rotating the S3 credentials | Medium | Long-term security posture | [#16](../../../issues/16) |
-| 8 | One region, one bucket, no backup-of-the-backup | Low | A whole-region outage | [#15](../../../issues/15) |
+| 4 | Where Traefik's HTTPS certificates come from | **Blocking** | A clean restore — silently | [#4](../../../issues/4) |
+| 5 | Who can actually perform a restore | High | The whole plan, if one person has the AWS access | [#16](../../../issues/16) |
+| 6 | Whether Velero's node-agent can read our volumes | High | All PVC and single-object restores | [#11](../../../issues/11) |
+| 7 | Crash-consistency of the Prometheus / Loki / MinIO volumes | Medium | Trusting a PVC restore | [#12](../../../issues/12) |
+| 8 | Is K3s encrypting Secrets inside its own database? | Medium | How loudly the runbook flags `cred/` | [#22](../../../issues/22) |
+| 9 | One region, one bucket, no backup-of-the-backup | Low | A whole-region outage | [#15](../../../issues/15) |
 
 ---
 
-## 1. Where Traefik's HTTPS certificates come from
+## 1. RPO and RTO are not signed off
+
+**Blocking, and it's a conversation rather than a command.**
+
+The design runs on two assumptions: we can lose up to **24 hours** of cluster state, and a rebuild
+may take **2–4 hours**. Daily backups are the right answer *if those numbers are right* and the
+wrong answer otherwise. Without them, "daily" is arbitrary.
+
+[02 §1](02-backup-strategy.md#1-two-numbers-to-agree-on-first--still-open) sets out exactly what
+changes for each answer, so this is cheap to revisit — but it should be a decision on the record,
+not a default nobody examined.
+
+**To close:** get the two numbers agreed, write them into 02 §1, and mark them signed off.
+
+---
+
+## 2. The heartbeat has nowhere to report to yet
+
+**Blocking.** The backup script pings `HEARTBEAT_URL` after it has verified its objects landed in
+S3. Nothing is listening yet, so today a silently stopped backup stays silent.
+
+This is the **only** alert that still works when `k3-master` is dead, which is the failure that
+matters most. Prometheus and Alertmanager run inside the cluster we're protecting; they go down with
+it.
+
+Three realistic channels:
+
+| Option | Effort | Notes |
+|--------|--------|-------|
+| Hosted dead-man's switch (healthchecks.io, Cronitor) | ~5 min | Free tier is enough. One URL, no infrastructure |
+| AWS-native: EventBridge rule on S3 `ObjectCreated` under `k3s/daily/` → CloudWatch alarm treating missing data as breaching | ~1 hour | No third party. More moving parts, and it watches the bucket rather than the script |
+| An Alertmanager or push gateway hosted **outside** this cluster | varies | Only worth it if one already exists |
+
+**To close:** pick one, set `HEARTBEAT_URL`, and prove it fires by stopping the timer for a day.
+
+---
+
+## 3. Nothing has ever been restored
+
+**Blocking.** All three flows in the [restore runbook](03-restore-runbook.md) are written but
+unproven, and the ~2 hour RTO in it is a guess.
+
+*A backup that has never been restored is a hope, not a plan.*
+
+**To close:** [03 §C](03-restore-runbook.md#c--the-restore-test) on a throwaway VM, then correct the
+runbook to match what actually happened rather than what we expected.
+
+---
+
+## 4. Where Traefik's HTTPS certificates come from
 
 **Blocking. This is the gap most likely to produce a restore that looks successful and isn't.**
 
@@ -33,19 +84,29 @@ certificates are one of:
 **Why it matters:** in the `emptyDir` case, every restore comes back with broken HTTPS and no
 warning beforehand. Nothing in the current design would catch it until users do.
 
-**To close:** inspect the Traefik deployment for an `acme.json` path and find out what backs that
-path.
-
-```bash
-sudo k3s kubectl -n kube-system get deploy traefik -o yaml | grep -iA3 'acme\|certresolver'
-sudo k3s kubectl -n kube-system get ingressroute,secret -o wide
-```
+**To close:** [07 stage 1.5](07-setup.md#15--where-do-the-https-certificates-come-from-node).
 
 ---
 
-## 2. Whether Velero's node-agent can actually read our volumes
+## 5. Who can actually perform a restore
 
-**Blocking.**
+The design deliberately has **no stored restore credential** — restores use a normal AWS admin or
+SSO login, which is better than keeping a permanent read key in a vault on a rotation schedule.
+
+That trade only holds if the access itself is not a single point of failure. Right now nobody has
+confirmed it isn't.
+
+**To close, and it takes five minutes:**
+
+- Name **at least two people** who can log into AWS and read `s3://k3-master-dr`.
+- Write the **bucket name and region** somewhere that survives losing AWS access to that account —
+  this repo counts, and it already says both.
+- Note who rotates the one backup-writer key, and how often. There's only one key now, so this is a
+  much smaller chore than before.
+
+---
+
+## 6. Whether Velero's node-agent can actually read our volumes
 
 File-system backup reads pod volumes through a hostPath into the kubelet root directory. K3s does
 not always use the stock `/var/lib/kubelet`. If the path doesn't match, **the node-agent starts
@@ -62,18 +123,7 @@ PVC into a scratch namespace.
 
 ---
 
-## 3. Nothing has ever been restored
-
-**Blocking.** Both flows in the [restore runbook](03-restore-runbook.md) are written but unproven,
-and the ~2 hour RTO in it is a guess.
-
-**To close:** [Phase 4](04-implementation-todo.md#phase-4--prove-a-restore-works). Run §A on a
-throwaway host and §B against a scratch namespace, then correct the runbook to match what actually
-happened rather than what we expected.
-
----
-
-## 4. Crash-consistency of the monitoring volumes
+## 7. Crash-consistency of the monitoring volumes
 
 File-system backup of a **running** database is crash-consistent, not application-consistent —
 equivalent to pulling the power cord.
@@ -87,12 +137,13 @@ adding one pre-emptively is complexity bought on speculation.
 
 ---
 
-## 5. Is K3s encrypting Secrets inside its own database?
+## 8. Is K3s encrypting Secrets inside its own database?
 
 Either answer is fine — we back up all of `cred/` regardless, so the key file is covered. What
 changes is the runbook: if it's **on**, then restoring `cred/encryption-config.json` becomes a hard
-precondition before starting K3s, and [step 4](03-restore-runbook.md#step-4--restore-the-cluster-identity-and-the-datastore)
-should say so in bold rather than as a footnote.
+precondition before starting K3s, and
+[step 4](03-restore-runbook.md#step-4--restore-the-identity-and-the-datastore) should say so in bold
+rather than as a footnote.
 
 ```bash
 sudo k3s secrets-encrypt status
@@ -100,54 +151,40 @@ sudo k3s secrets-encrypt status
 
 ---
 
-## 6. Does our "backup succeeded" signal go anywhere?
-
-Job 1 writes a metric into `/var/lib/node_exporter/textfile_collector`. If that directory doesn't
-exist, the script skips it silently — and discovery never confirmed node-exporter is installed on
-the host at all.
-
-**This is why [02 §8](02-backup-strategy.md#8-knowing-it-works) makes the primary alert *object age
-in S3* instead.** That proves the backup actually arrived; the textfile metric only proves the
-script thinks well of itself. Keep the metric as a bonus, don't build the alerting on it.
-
-**To close:** find out what node-exporter is here ([07 Stage B.1b](07-phase-0-1-execution.md)), then
-wire the S3 object-age alert either way.
-
----
-
-## 7. Nobody owns rotating the S3 credentials
-
-Long-lived write credentials to a bucket that holds the cluster CA and every Secret in readable form
-are an ongoing risk.
-
-**To close:** one named person, one schedule (suggest 90 days), written down here.
-
----
-
-## 8. One region, one bucket
+## 9. One region, one bucket
 
 Reasonable given a single server with no failover — the server is a far bigger single point of
-failure than a whole AWS region. But it should be **a decision on the record**, not a default
-nobody examined. Versioning plus locked-down delete permissions is the meaningful protection here,
+failure than a whole AWS region. But it should be **a decision on the record**, not a default nobody
+examined. Versioning plus a credential that cannot delete or read is the meaningful protection here,
 not a second region.
+
+Related and already decided: we protect against host loss and a compromised `k3-master`, **not**
+against a compromised AWS account. If that changes, the answer is S3 Object Lock or a separate
+account — see [02 §9](02-backup-strategy.md#9-the-immutability-decision--made-and-on-the-record).
 
 ---
 
 ## Closed by the simplified design
 
-These were real gaps against the previous plan. The current design resolves them — kept here so the
-reasoning isn't lost.
+These were real gaps against earlier versions of the plan. The current design resolves them — kept
+here so the reasoning isn't lost.
 
 | Was | Now |
 |-----|-----|
-| **Host OS settings weren't backed up** (network, firewall, SSH, packages) — restore step 2 was reconstruction from memory | Captured by Job 1 as `node-config.tar.gz`, in the same folder as everything else. Closes old gaps 3 and 4 ([#5](../../../issues/5), [#6](../../../issues/6)) |
-| **Backups didn't record which K3s version made them** | `MANIFEST.json` in every run folder ([#17](../../../issues/17)) |
-| **Nothing said which files belonged to the same backup run** — 4 datastore runs a day across 7 prefixes | One run a day, one folder, one complete set. The problem is gone rather than solved ([#23](../../../issues/23)) |
-| **The runbook told you to use tools that didn't exist** | Both flows now name exactly what must be installed first, and Phase 2 is the blocker ([#18](../../../issues/18)) |
+| **Host OS settings weren't backed up** — restore step 2 was reconstruction from memory | Captured as a plain-text fact sheet inside the one archive: addresses, routes, firewall, timezone, disk layout, packages, netplan, the K3s start command ([#5](../../../issues/5), [#6](../../../issues/6)) |
+| **`/etc/ssh` and `authorized_keys` were in the backup** | **Removed.** Host private keys don't belong in the bucket, and restoring a dead host's SSH identity onto a new machine is the wrong move |
+| **Backups didn't record which K3s version made them** | `MANIFEST.json`, uploaded beside the archive *and* inside it, with the version, the raw version string and the real start command ([#17](../../../issues/17)) |
+| **The exact K3s release might not be downloadable years later** | The binary is uploaded once per version to `k3s-release/<version>/`, never expired, with a `RESTORE.txt` ([02 §8](02-backup-strategy.md#8-future-proofing-a-restore)) |
+| **A customer-managed KMS key, its alias, rotation, four IAM actions, a key-ARN bucket policy, and a 64 MB test upload to catch the non-obvious `kms:Decrypt` requirement** | **Removed.** SSE-S3 by default, plus a credential with no read access to `k3s/*` — simpler *and* a tighter blast radius ([#14](../../../issues/14), [#21](../../../issues/21), [#24](../../../issues/24)) |
+| **A second permanent restore-reader key on a 90-day rotation** | **Removed.** Restores use an admin/SSO login. What replaced it is gap 5 above: two named people, written down |
+| **The server could read every backup it ever wrote** | No `s3:GetObject` outside `velero/*`. Uploads are verified by listing instead |
+| **Four artifacts and four checksums per run** | One archive, one checksum, one manifest. They were only ever restored together ([#23](../../../issues/23)) |
+| **Alerting was built on a node-exporter textfile metric nobody had confirmed was read** | **Removed.** Replaced by a heartbeat pinged after the objects are verified in S3 — which also works when the server is dead (gap 2) |
+| **"Check it by hand every day for a week" was the monitoring plan** | Watch two or three runs, then rely on the alerts |
+| **Two parallel runbooks (a 4,100-line day-by-day and a 1,300-line stage-by-stage) describing the same setup** | One: [07 — Setup](07-setup.md) |
+| **The runbook told you to use tools that didn't exist** | Every flow names what must be installed first ([#18](../../../issues/18)) |
 | **Nobody had written down how K3s certificates expire** | The "normal kind vs. real problem" table in [restore step 6](03-restore-runbook.md#step-6--start-k3s-and-verify-the-control-plane) ([#19](../../../issues/19)) |
-| **The backup login couldn't upload a 64 MB file** — no `kms:Decrypt`, and the test used a 50-byte file that passed | `kms:Decrypt` scoped to our one key, and the preflight uploads 64 MB ([#21](../../../issues/21)) |
-| **A bare KMS key id would deny every upload** | The script rejects anything that isn't a full ARN, with a readable message ([#24](../../../issues/24)) |
-| **Do we need a daily ArgoCD export?** Two documents disagreed | **Decided: no.** Velero backs up the `argocd` namespace including Secrets, Applications and AppProjects; Git holds the app definitions. Verify once in Phase 2, then it's settled ([#20](../../../issues/20), [#1](../../../issues/1)) |
+| **Do we need a daily ArgoCD export?** | **No.** Velero backs up the `argocd` namespace including Secrets, Applications and AppProjects; Git holds the app definitions. Verify once in phase 3 ([#20](../../../issues/20), [#1](../../../issues/1)) |
 | **Who hosts this server** | Datalix, treated as on-premise. No hosting-level snapshot available ([#13](../../../issues/13)) |
 | **This documentation could live only on the server** | This repo is the one true copy ([#7](../../../issues/7)) |
 

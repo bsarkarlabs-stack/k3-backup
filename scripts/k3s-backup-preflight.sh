@@ -1,27 +1,28 @@
 #!/usr/bin/env bash
 #
-# k3s-backup-preflight.sh — verify EVERYTHING before the first real backup runs.
+# k3s-backup-preflight.sh — check everything before the first real backup runs.
 #
 #   Usage:  sudo ./k3s-backup-preflight.sh              # full check
-#           sudo ./k3s-backup-preflight.sh --no-aws     # skip AWS/S3 checks
-#           sudo ./k3s-backup-preflight.sh --no-upload  # AWS checks, no test upload
+#           sudo ./k3s-backup-preflight.sh --no-aws     # local checks only
+#           sudo ./k3s-backup-preflight.sh --no-upload  # AWS checks, no test object
 #
 # This script CHANGES NOTHING on the cluster. Against K3s it is strictly
 # read-only: it never starts, stops or reconfigures anything, never writes
 # inside /var/lib/rancher/k3s or /etc/rancher/k3s, and opens the datastore
-# read-only. The only thing it writes anywhere is two throwaway test objects
-# in S3 under _preflight/ (fixed key names, so repeat runs overwrite rather
-# than accumulate).
+# read-only. The only thing it writes anywhere is one small throwaway object
+# in S3 under _preflight/ with a fixed key, so repeat runs overwrite it.
 #
-# It answers four questions, in order:
+# It answers five questions, in order:
 #
-#   A. Is the tooling on this box capable of running the backup at all?
-#   B. Is the config file present, correct, and correctly formatted?
-#   C. Does the S3 bucket / KMS key / IAM login actually exist and work?
-#      Including a 64 MB multipart upload, which is the one that catches a
-#      missing kms:Decrypt (#21) — a small-file test passes and hides it.
-#   D. What is actually running in each namespace, and what of it would NOT
-#      be recovered by the backup we have today?
+#   A. Can this box run the backup at all?
+#   B. Is the config file present and correct?
+#   C. Does the backup credential work, and is it as narrow as it should be?
+#      Bucket *settings* (versioning, encryption, lifecycle) are deliberately
+#      not checked here — this credential cannot read them, and it should not
+#      be able to. They are verified once at setup with an admin login;
+#      see docs/07-setup.md stage 2.
+#   D. Is every file the backup reads actually there?
+#   E. What is running, and what of it would NOT be recovered today?
 #
 # Exit codes:  0 = ready to run    1 = blocking problems    2 = warnings only
 #
@@ -80,14 +81,15 @@ else
        "sudo $0 $*"
 fi
 
-for t in aws tar gzip python3 flock sha256sum openssl; do
+for t in aws tar gzip python3 flock sha256sum curl openssl; do
   if command -v "$t" >/dev/null 2>&1; then
     pass "$t present"
   else
     case "$t" in
-      aws) fail "$t missing — required to upload backups" "apt-get install -y awscli  # or the official AWS CLI v2 installer" ;;
+      aws)     fail "$t missing — required to upload backups" "apt-get install -y awscli  # or the official AWS CLI v2 installer" ;;
+      curl)    warn "$t missing — only needed for the backup heartbeat" "apt-get install -y curl" ;;
       openssl) warn "$t missing — only needed to read certificate expiry dates" "apt-get install -y openssl" ;;
-      *)   fail "$t missing — required by the backup script" "apt-get install -y $t" ;;
+      *)       fail "$t missing — required by the backup script" "apt-get install -y $t" ;;
     esac
   fi
 done
@@ -140,37 +142,44 @@ if [ -r "$ENV_FILE" ]; then
   # shellcheck disable=SC1090
   set -a; . "$ENV_FILE" 2>/dev/null; set +a
 
-  for v in S3_BUCKET AWS_REGION KMS_KEY_ID; do
+  for v in S3_BUCKET AWS_REGION; do
     if [ -n "${!v:-}" ]; then pass "$v is set"; else
       fail "$v is not set in $ENV_FILE" "echo '$v=...' >> $ENV_FILE"; CFG_OK=0
     fi
   done
-
-  # #24 — the bucket policy compares against the full ARN
-  case "${KMS_KEY_ID:-}" in
-    arn:aws:kms:*) pass "KMS_KEY_ID is a full ARN (correct)" ;;
-    "")            : ;;
-    *) fail "KMS_KEY_ID is '${KMS_KEY_ID}' — must be the full ARN, not a key id or alias" \
-            "aws kms describe-key --key-id ${KMS_KEY_ID} --query KeyMetadata.Arn --output text
-       # put that ARN in $ENV_FILE as KMS_KEY_ID"; CFG_OK=0 ;;
-  esac
 
   for v in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
     if [ -n "${!v:-}" ]; then pass "$v is set"; else
       warn "$v not set in the config — fine only if this server uses an instance role" ""
     fi
   done
+
+  # The one alert that survives this server dying. Everything in-cluster
+  # (Prometheus, Alertmanager) goes down with it.
+  if [ -n "${HEARTBEAT_URL:-}" ]; then
+    pass "HEARTBEAT_URL is set — a missed backup will be noticed off this server"
+  else
+    warn "HEARTBEAT_URL is not set — if backups stop, nothing outside this server will notice" \
+         "# pick a dead-man's-switch endpoint (docs/02-backup-strategy.md §7), then:
+       echo 'HEARTBEAT_URL=https://...' >> $ENV_FILE"
+  fi
+
+  case "${KMS_KEY_ID:-}" in
+    "") : ;;
+    *)  warn "KMS_KEY_ID is still set in $ENV_FILE — the design now uses SSE-S3 and ignores it" \
+             "# remove the KMS_KEY_ID line from $ENV_FILE (docs/02-backup-strategy.md §3)" ;;
+  esac
 else
   fail "config file missing: $ENV_FILE" \
        "sudo install -d -m 0700 -o root -g root /etc/k3s-backup
        sudo install -m 0600 -o root -g root /dev/null $ENV_FILE
-       # then add: S3_BUCKET, AWS_REGION, KMS_KEY_ID (full ARN),
-       #           AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY"
+       # then add: S3_BUCKET, AWS_REGION, AWS_ACCESS_KEY_ID,
+       #           AWS_SECRET_ACCESS_KEY, HEARTBEAT_URL"
   CFG_OK=0
 fi
 
 # ===========================================================================
-section "C. AWS — bucket, key, and login"
+section "C. The backup credential"
 # ===========================================================================
 
 if [ "$DO_AWS" -eq 0 ]; then
@@ -180,8 +189,7 @@ elif [ "$CFG_OK" -eq 0 ]; then
 else
   export AWS_DEFAULT_REGION="$AWS_REGION"
 
-  WHO=$(aws sts get-caller-identity --query Arn --output text 2>&1)
-  if [ $? -eq 0 ] && [ -n "$WHO" ]; then
+  if WHO=$(aws sts get-caller-identity --query Arn --output text 2>&1) && [ -n "$WHO" ]; then
     pass "AWS login works: $WHO"
   else
     fail "AWS login failed — check the keys in $ENV_FILE" \
@@ -190,193 +198,86 @@ else
   fi
 
   if [ -n "$WHO" ]; then
-    # ---- bucket exists and is reachable -------------------------------
-    if aws s3api head-bucket --bucket "$S3_BUCKET" >/dev/null 2>&1; then
-      pass "bucket exists and is reachable: s3://$S3_BUCKET"
-
-      # ---- public access block ----------------------------------------
-      PAB=$(aws s3api get-public-access-block --bucket "$S3_BUCKET" \
-              --query 'PublicAccessBlockConfiguration.[BlockPublicAcls,IgnorePublicAcls,BlockPublicPolicy,RestrictPublicBuckets]' \
-              --output text 2>/dev/null)
-      if [ "$PAB" = "True	True	True	True" ]; then
-        pass "all public access is blocked"
-      else
-        fail "public access is not fully blocked (got: ${PAB:-none}) — this bucket holds the cluster CA" \
-             "aws s3api put-public-access-block --bucket $S3_BUCKET \\
-         --public-access-block-configuration \\
-         BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
-      fi
-
-      # ---- versioning --------------------------------------------------
-      VER=$(aws s3api get-bucket-versioning --bucket "$S3_BUCKET" --query Status --output text 2>/dev/null)
-      if [ "$VER" = "Enabled" ]; then
-        pass "versioning is enabled"
-      else
-        fail "versioning is '${VER:-off}' — without it a bad overwrite is unrecoverable" \
-             "aws s3api put-bucket-versioning --bucket $S3_BUCKET \\
-         --versioning-configuration Status=Enabled"
-      fi
-
-      # ---- default encryption -----------------------------------------
-      ENC=$(aws s3api get-bucket-encryption --bucket "$S3_BUCKET" \
-              --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.SSEAlgorithm' \
-              --output text 2>/dev/null)
-      ENCKEY=$(aws s3api get-bucket-encryption --bucket "$S3_BUCKET" \
-              --query 'ServerSideEncryptionConfiguration.Rules[0].ApplyServerSideEncryptionByDefault.KMSMasterKeyID' \
-              --output text 2>/dev/null)
-      if [ "$ENC" = "aws:kms" ]; then
-        pass "default encryption is SSE-KMS"
-        if [ "$ENCKEY" = "$KMS_KEY_ID" ]; then
-          pass "bucket default key matches KMS_KEY_ID"
-        else
-          warn "bucket default key differs from KMS_KEY_ID — uploads pass the key explicitly, so this is survivable, but confirm it is intended" \
-               "aws s3api get-bucket-encryption --bucket $S3_BUCKET"
-        fi
-      else
-        fail "default encryption is '${ENC:-none}', expected aws:kms — backups contain plaintext Secrets and the cluster CA" \
-             "# see docs/07 Stage C.5 — and note encryption is NOT retroactive,
-       # anything already uploaded stays unencrypted"
-      fi
-
-      # ---- bucket policy -----------------------------------------------
-      if aws s3api get-bucket-policy --bucket "$S3_BUCKET" >/dev/null 2>&1; then
-        pass "a bucket policy is attached"
-      else
-        warn "no bucket policy — the deny-unencrypted and deny-wrong-key guards are missing" \
-             "# see docs/07 Stage C.6"
-      fi
-
-      # ---- lifecycle rules: without these the bucket grows forever ------
-      LC=$(aws s3api get-bucket-lifecycle-configuration --bucket "$S3_BUCKET" \
-             --query 'Rules[].Filter.Prefix' --output text 2>/dev/null)
-      if [ -n "$LC" ]; then
-        pass "lifecycle rules are configured"
-
-        # Exactly two rules are expected: 7 daily + 4 weekly. See docs/02 §6.
-        for p in k3s/daily/ k3s/weekly/; do
-          case " $LC " in
-            *" $p "*) : ;;
-            *) warn "no lifecycle rule covers $p — that folder will grow without limit" \
-                    "# see docs/07 Stage C.6a for the two-rule set" ;;
-          esac
-        done
-
-        # A lifecycle rule on velero/ is actively destructive: Velero's file-system
-        # backups live in a Kopia repository whose objects reference each other, and
-        # it expires them itself by TTL. An S3 expiry deletes chunks that valid
-        # backups still depend on, and the damage only surfaces during a restore.
-        case " $LC " in
-          *" velero"*)
-            fail "a lifecycle rule covers velero/ — this will silently corrupt Velero backups" \
-                 "# remove any rule whose prefix starts with velero/ (docs/02 §6).
-       Velero expires its own backups by TTL. If you want a safety net there,
-       use a NONCURRENT version expiry, never a current-version one." ;;
-        esac
-
-        aws s3api get-bucket-lifecycle-configuration --bucket "$S3_BUCKET" \
-          --query "Rules[?AbortIncompleteMultipartUpload].ID" --output text 2>/dev/null \
-          | grep -q . \
-          && pass "stuck multipart uploads get cleaned up" \
-          || warn "no AbortIncompleteMultipartUpload rule — a failed 64 MB upload leaves chunks that cost money and don't show in 'aws s3 ls'" \
-                  "# see docs/07 Stage C.6a"
-      else
-        warn "NO lifecycle rules — nothing under k3s/ is ever deleted, so the bucket grows without limit" \
-             "# see docs/07 Stage C.6a — two rules: k3s/daily/ expire 8 days,
-       # k3s/weekly/ expire 31 days. Nothing on velero/ (Velero uses TTL)."
-      fi
+    if aws s3api list-objects-v2 --bucket "$S3_BUCKET" --max-items 1 >/dev/null 2>&1; then
+      pass "bucket is reachable and listable: s3://$S3_BUCKET"
     else
-      fail "bucket s3://$S3_BUCKET does not exist or is not reachable" \
-           "# create it first — docs/07 Stage C.2:
-       aws s3api create-bucket --bucket $S3_BUCKET --region $AWS_REGION \\
-         --create-bucket-configuration LocationConstraint=$AWS_REGION
-       # (us-east-1 is the exception: it rejects --create-bucket-configuration)"
+      fail "cannot list s3://$S3_BUCKET — wrong bucket name, wrong region, or no s3:ListBucket" \
+           "aws s3api list-objects-v2 --bucket $S3_BUCKET --max-items 1
+       # the bucket itself is created at setup — docs/07-setup.md stage 2"
     fi
 
-    # ---- KMS key ------------------------------------------------------
-    KSTATE=$(aws kms describe-key --key-id "$KMS_KEY_ID" \
-               --query 'KeyMetadata.[KeyState,KeyManager]' --output text 2>/dev/null)
-    if [ -n "$KSTATE" ]; then
-      pass "KMS key reachable ($KSTATE)"
-      case "$KSTATE" in
-        *PendingDeletion*) fail "the KMS key is PENDING DELETION — every backup encrypted with it becomes unreadable" \
-                                "aws kms cancel-key-deletion --key-id $KMS_KEY_ID" ;;
-      esac
-    else
-      fail "cannot read the KMS key $KMS_KEY_ID — wrong ARN, wrong region, or missing kms:DescribeKey" \
-           "aws kms describe-key --key-id $KMS_KEY_ID --region $AWS_REGION"
-    fi
-
-    # ---- the upload tests --------------------------------------------
     if [ "$DO_UPLOAD" -eq 1 ]; then
       TMPD=$(mktemp -d)
+      PROBE=_preflight/probe.txt
+      echo "preflight $(date -u +%FT%TZ)" > "$TMPD/probe.txt"
 
-      # small: single-part. Passes with minimal KMS permissions.
-      echo "preflight $(date -u +%FT%TZ)" > "$TMPD/small.txt"
-      if aws s3 cp "$TMPD/small.txt" "s3://$S3_BUCKET/_preflight/small.txt" \
-           --only-show-errors --sse aws:kms --sse-kms-key-id "$KMS_KEY_ID" 2>"$TMPD/err1"; then
-        pass "small upload works (single-part)"
+      if aws s3 cp "$TMPD/probe.txt" "s3://$S3_BUCKET/$PROBE" \
+           --only-show-errors 2>"$TMPD/err"; then
+        pass "upload works, and S3 encrypted it on arrival (bucket default SSE-S3)"
+
+        # The backup verifies its own uploads this way, so prove it works here.
+        SZ=$(aws s3api list-objects-v2 --bucket "$S3_BUCKET" --prefix "$PROBE" \
+               --query "Contents[?Key=='$PROBE'].Size | [0]" --output text 2>/dev/null)
+        if [ "$SZ" = "$(stat -c %s "$TMPD/probe.txt")" ]; then
+          pass "uploads can be verified by listing — this is how the backup confirms itself"
+        else
+          fail "could not confirm the uploaded object by listing (got '${SZ:-nothing}')" \
+               "# the credential needs s3:ListBucket on arn:aws:s3:::$S3_BUCKET"
+        fi
       else
-        fail "even a small upload failed: $(head -c 200 "$TMPD/err1")" \
-             "# check the IAM policy allows s3:PutObject and kms:GenerateDataKey on this bucket/key"
+        fail "upload failed: $(head -c 200 "$TMPD/err")" \
+             "# the credential needs s3:PutObject on arn:aws:s3:::$S3_BUCKET/k3s/*
+       # see docs/07-setup.md stage 2"
       fi
 
-      # large: multipart. THIS is the one that catches a missing kms:Decrypt (#21).
-      info "building a 64 MB test file to force a multipart upload (this is the check that catches #21)..."
-      dd if=/dev/zero of="$TMPD/big.bin" bs=1M count=64 status=none 2>/dev/null
-      if aws s3 cp "$TMPD/big.bin" "s3://$S3_BUCKET/_preflight/big.bin" \
-           --only-show-errors --sse aws:kms --sse-kms-key-id "$KMS_KEY_ID" 2>"$TMPD/err2"; then
-        pass "64 MB multipart upload works — the real datastore upload will succeed"
+      # Guardrail 1: this credential must not be able to READ backups. The
+      # archive holds the cluster CA and every Secret, so a compromised server
+      # should not be able to download its own history.
+      if aws s3api get-object --bucket "$S3_BUCKET" --key "$PROBE" "$TMPD/back.txt" >/dev/null 2>&1; then
+        warn "this credential CAN download objects it wrote — a compromised server could read the cluster CA out of S3" \
+             "# drop s3:GetObject outside velero/* from the writer policy (docs/07-setup.md stage 2)"
       else
-        fail "multipart (64 MB) upload FAILED while the small one succeeded — this is the missing-kms:Decrypt trap: $(head -c 200 "$TMPD/err2")" \
-             "# add kms:Decrypt for this key to the backup login's policy (issue #21):
-       #   \"Action\": [\"kms:Encrypt\",\"kms:GenerateDataKey\",\"kms:Decrypt\",\"kms:DescribeKey\"]
-       # it does not widen access — the policy already grants s3:GetObject"
+        pass "reading back objects is refused — a compromised server cannot exfiltrate old backups"
       fi
 
-      # guardrail: delete must be refused OUTSIDE velero/. A compromised server
-      # must not be able to destroy the k3s/ backups.
-      if aws s3api delete-object --bucket "$S3_BUCKET" --key "_preflight/small.txt" >/dev/null 2>&1; then
-        warn "this login CAN delete objects outside velero/ — a compromised server could destroy the backups" \
-             "# scope s3:DeleteObject to arn:aws:s3:::$S3_BUCKET/velero/* only, never bucket-wide
-       # (docs/07 Stage C.7). Velero needs it there; nothing needs it under k3s/."
+      # Guardrail 2: it must not be able to DELETE outside velero/.
+      if aws s3api delete-object --bucket "$S3_BUCKET" --key "$PROBE" >/dev/null 2>&1; then
+        warn "this credential CAN delete objects outside velero/ — a compromised server could destroy the backups" \
+             "# scope s3:DeleteObject to arn:aws:s3:::$S3_BUCKET/velero/* only, never bucket-wide"
       else
         pass "delete outside velero/ is correctly refused"
       fi
 
-      # the opposite guardrail: delete MUST be allowed inside velero/, or Velero
-      # can never expire a backup and the 7+4 retention silently never happens.
-      # This one cleans up after itself, since the login can delete here.
-      if aws s3 cp "$TMPD/small.txt" "s3://$S3_BUCKET/velero/_preflight-permcheck.txt" \
-           --only-show-errors --sse aws:kms --sse-kms-key-id "$KMS_KEY_ID" 2>/dev/null; then
+      # Guardrail 3: the opposite — it MUST be able to delete inside velero/,
+      # or Velero can never expire a backup and retention silently never happens.
+      if aws s3 cp "$TMPD/probe.txt" "s3://$S3_BUCKET/velero/_preflight-permcheck.txt" \
+           --only-show-errors 2>/dev/null; then
         if aws s3api delete-object --bucket "$S3_BUCKET" \
              --key "velero/_preflight-permcheck.txt" >/dev/null 2>&1; then
           pass "delete inside velero/ works — Velero can expire its own backups"
         else
           fail "delete inside velero/ is DENIED — Velero can never expire a backup, so retention silently becomes 'keep forever'" \
-               "# add to the writer policy (docs/07 Stage C.7):
-       #   { \"Sid\": \"VeleroExpiresItsOwnBackups\", \"Effect\": \"Allow\",
-       #     \"Action\": [\"s3:DeleteObject\"],
-       #     \"Resource\": \"arn:aws:s3:::$S3_BUCKET/velero/*\" }"
+               "# add s3:DeleteObject on arn:aws:s3:::$S3_BUCKET/velero/* to the writer policy"
         fi
       else
         warn "could not write a test object under velero/ — Velero's own uploads may fail too" \
              "# confirm the writer policy covers s3:PutObject on $S3_BUCKET/velero/*"
       fi
 
-      # guardrail: unencrypted put must be refused
-      if aws s3api put-object --bucket "$S3_BUCKET" --key "_preflight/plain.txt" \
-           --body "$TMPD/small.txt" >/dev/null 2>&1; then
-        warn "an UNENCRYPTED upload was accepted — the deny-unencrypted policy is not working" \
-             "# see docs/07 Stage C.6"
-      else
-        pass "unencrypted uploads are correctly refused"
-      fi
-
-      info "test objects left at s3://$S3_BUCKET/_preflight/ (this login cannot delete them —"
-      info "remove with an admin login, or let a lifecycle rule expire that prefix)"
+      info "test object left at s3://$S3_BUCKET/$PROBE (this credential cannot delete it —"
+      info "the _preflight/ lifecycle rule expires it in 2 days)"
       rm -rf "$TMPD"
     else
-      info "upload tests skipped (--no-upload) — note this leaves #21 unverified"
+      info "upload test skipped (--no-upload)"
+    fi
+
+    if [ -n "${HEARTBEAT_URL:-}" ] && command -v curl >/dev/null 2>&1; then
+      if curl -fsS -m 15 -o /dev/null "$HEARTBEAT_URL"; then
+        pass "heartbeat endpoint accepted a ping"
+      else
+        fail "the heartbeat endpoint did not accept a ping — alerting would report every backup as missing" \
+             "curl -v -m 15 '$HEARTBEAT_URL'"
+      fi
     fi
   fi
 fi
@@ -397,6 +298,7 @@ check_path "$K3S_SERVER_DIR/cred"         "join credentials folder"
 check_path "$K3S_SERVER_DIR/token"        "server token"
 check_path "$K3S_SERVER_DIR/manifests"    "built-in setup files"
 check_path "/etc/rancher/k3s"             "k3s config folder"
+check_path "/etc/systemd/system/k3s.service" "k3s systemd unit (holds the start flags)"
 
 if [ -e "$K3S_SERVER_DIR/token" ]; then
   TPERM=$(stat -c '%a %U:%G' "$K3S_SERVER_DIR/token" 2>/dev/null)
@@ -451,22 +353,10 @@ fi
 
 # secrets-encryption: changes how critical cred/ is
 if [ -e "$K3S_SERVER_DIR/cred/encryption-config.json" ]; then
-  warn "secrets-encryption appears ENABLED (cred/encryption-config.json exists) — without that file every Secret in a restored database is unreadable. It IS backed up inside cred/, but a restore must confirm it landed." \
+  warn "secrets-encryption appears ENABLED (cred/encryption-config.json exists) — without that file every Secret in a restored database is unreadable. It IS in the backup, but a restore must confirm it landed." \
        "sudo k3s secrets-encrypt status"
 else
   pass "no encryption-config.json — Secrets are not separately encrypted in the datastore"
-fi
-
-# #22 — is anything actually reading the success metric?
-TFD=${TEXTFILE_DIR:-/var/lib/node_exporter/textfile_collector}
-if [ -d "$TFD" ]; then
-  pass "node_exporter textfile directory exists ($TFD) — the success metric will be picked up"
-else
-  warn "no textfile directory at $TFD — the 'backup succeeded' metric is written nowhere, so failure alerting would be silent (issue #22)" \
-       "# find out what node_exporter actually is here:
-       systemctl list-units --all | grep -i node.exporter
-       k3s kubectl get ds,deploy -A | grep -i node-exporter
-       # then set TEXTFILE_DIR in $ENV_FILE, or alert on S3 object age instead"
 fi
 
 # ===========================================================================
@@ -546,30 +436,29 @@ section "F. Coverage — what today's backup does NOT recover"
 # ===========================================================================
 
 cat <<'EOF'
-  Job 1 — k3s-server-backup.sh — covers:
+  Job 1 — k3s-server-backup.sh — one archive a day, covers:
 
     [x] K3s datastore (state.db)       -> rebuilds THIS server
     [x] Cluster identity (tls/, cred/) -> certificate authority and join key
     [x] Server token                   -> unlocks the datastore's bootstrap data
-    [x] K3s config + systemd unit      -> including --tls-san and start flags
+    [x] K3s config + systemd unit      -> including --tls-san and the start flags
     [x] Built-in setup files (manifests/)
-    [x] Host OS settings               -> network, firewall, ssh, packages
-    [x] MANIFEST.json                  -> which k3s version made this backup
+    [x] Host fact sheet (text)         -> addresses, firewall, packages, timezone
+    [x] MANIFEST.json                  -> which k3s version to install
+    [x] The k3s binary itself          -> kept once per version under k3s-release/
 
   Job 2 — Velero — covers everything Job 1 cannot:
 
     [ ] PVC data (the volumes listed in section E)
           Job 1 does NOT back up their contents. Without Velero, a restore
-          brings the monitoring stack back EMPTY. Issue #11.
+          brings the monitoring stack back EMPTY.
 
     [ ] Restoring a single deleted object
           Without Velero there is no way to put back one Deployment or
           Secret — the only lever is rolling the whole datastore back, which
-          reverts everything else too. Issue #11.
+          reverts everything else too.
 
     [ ] Restoring into a fresh or different-version cluster
-          The datastore snapshot only helps when rebuilding THIS server at
-          THIS k3s version. Issue #11.
 
   If Velero is not installed yet, everything under Job 2 is uncovered today.
 
@@ -608,7 +497,7 @@ if [ "$FAILS" -gt 0 ]; then
   exit 1
 elif [ "$WARNS" -gt 0 ]; then
   printf '  %sREADY, with warnings%s — safe to run the backup. Read the warnings first;\n' "$c_yel" "$c_off"
-  printf '  some of them (especially #22) mean a failure could go unnoticed later.\n'
+  printf '  a missing HEARTBEAT_URL in particular means a failure could go unnoticed.\n'
   exit 2
 else
   printf '  %sREADY%s — everything checks out. Next step:\n' "$c_grn" "$c_off"

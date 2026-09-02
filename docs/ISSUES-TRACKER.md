@@ -1,26 +1,28 @@
 # Issues Tracker — Answer & Fix One by One
 
-> **Note:** This file was created on user request, to list every open issue in one place so
-> answers and outputs can be filled in one by one. **Do not delete this file.**
+> **Note:** This file was created on user request, to list every open issue in one place so answers
+> and outputs can be filled in one by one. **Do not delete this file.**
 
-How to use this file: go top to bottom, in order. For each issue, fill in the **Answer /
-Output** box with whatever you find (command output, a decision, a "yes it's done" — whatever
-applies). Once an issue is answered, we mark it done and move to the next one.
+How to use this file: go top to bottom, in order. For each issue, fill in the **Answer / Output**
+box with whatever you find (command output, a decision, a "yes it's done" — whatever applies). Once
+an issue is answered, we mark it done and move to the next one.
 
 ---
 
-## Build Phases — the main work, do these in order
+## Build phases — the main work, in order
 
-### 1. [#9](../../../issues/9) — Phase 0: Get the basics ready
+### 1. [#9](../../../issues/9) — Phase 1: Validate
 **Priority: Do this first — everything else depends on it**
 
-What needs to happen:
-- Confirm who hosts the server (already known: Datalix, on-premise, no snapshot feature)
-- Install `sqlite3` or confirm Python's `sqlite3` module works
-- Create the S3 bucket `k3-master-dr` — versioning ON, own encryption key, public access blocked
-- Create a write-only login for the server to use
-- Create a separate read-only login for restores, store it offline
-- Test that the server can actually reach S3
+Commands: [07 stage 1](07-setup.md#stage-1--validate-the-server).
+
+- Run `k3s-backup-preflight.sh --no-aws` and get a READY result
+- Confirm hostname, K3s version, service enabled, ≥5 GB free, `etcd-snapshot ls` still disabled
+- Confirm Python's `sqlite3` module works (nothing to install if it does)
+- List `server/tls/` and `server/cred/` file-by-file — names and permissions only, never contents
+- Record the certificate expiry dates (CA ≈10 years, leaf ≈1 year)
+- `k3s secrets-encrypt status`
+- **Where do Traefik's HTTPS certificates come from?** (see #4 below — do this one first)
 
 **Answer / Output:**
 ```
@@ -29,15 +31,39 @@ What needs to happen:
 
 ---
 
-### 2. [#10](../../../issues/10) — Phase 1: Job 1, the K3s server backup
+### 2. [#3](../../../issues/3) — Agree an RPO and an RTO
+**Priority: Highest — it's a decision, not a command, and everything else assumes an answer**
+
+The design assumes we can lose up to **24 hours** of cluster state (RPO) and that a rebuild may take
+**2–4 hours** (RTO). Daily backups are correct *if those are right*.
+
+[02 §1](02-backup-strategy.md#1-two-numbers-to-agree-on-first--still-open) lists exactly what
+changes for each possible answer, so this is cheap to revisit — but it should be signed off rather
+than assumed.
+
+**Answer / Output:**
+```
+RPO agreed:
+RTO agreed:
+Signed off by / date:
+```
+
+---
+
+### 3. [#10](../../../issues/10) — Phase 2: Job 1, the K3s server backup
 **Priority: Highest**
 
-What needs to happen:
-- Deploy `scripts/k3s-server-backup.sh` + `scripts/systemd/k3s-backup.{service,timer}` (both
-  already written) onto `k3-master`
-- Confirm a dry run produces `state.db`, `k3s-identity.tar.gz`, `node-config.tar.gz`,
-  `MANIFEST.json` and their `.sha256` files
-- Confirm one real run lands in `s3://k3-master-dr/k3s/daily/YYYY-MM-DD/`
+Commands: [07 stages 2–3](07-setup.md#stage-2--create-the-bucket-and-the-one-credential).
+
+- Bucket: public access blocked, versioning on, **default SSE-S3**, HTTPS-only bucket policy
+- Four lifecycle rules — `k3s/daily/` 8 d, `k3s/weekly/` 31 d, `_preflight/` 2 d, abort stuck
+  multipart uploads. **Nothing on `velero/`, nothing on `k3s-release/`**
+- **One** IAM user: `PutObject` on `k3s/*` + `k3s-release/*`, `ListBucket` on the bucket, full
+  control on `velero/*` only. No `GetObject` and no `DeleteObject` outside `velero/`
+- Deploy `scripts/k3s-server-backup.sh` + the two systemd units
+- Preflight with AWS: confirm read-back and delete are **refused**
+- `DRY_RUN=1` → one `.tar.gz`, one `.sha256`, one `MANIFEST.json`, and `NRestarts` unchanged
+- One real run → three objects in `k3s/daily/YYYY-MM-DD/` and the binary in `k3s-release/`
 - `systemctl enable --now k3s-backup.timer`
 
 **Answer / Output:**
@@ -47,19 +73,21 @@ What needs to happen:
 
 ---
 
-### 3. [#11](../../../issues/11) — Phase 2: Job 2, Velero
-**Priority: Highest — currently not done at all. This is half the design.**
+### 4. [#11](../../../issues/11) — Phase 3: Job 2, Velero
+**Priority: Highest — this is half the design and currently doesn't exist at all**
 
-What needs to happen:
-- Run `scripts/velero/install-velero.sh` — Velero + AWS plugin, node-agent on, `prefix=velero`
+Commands: [07 stage 4](07-setup.md#stage-4--deploy-job-2-velero).
+
+- Find K3s's kubelet root **before** trusting anything
+- Run `scripts/velero/install-velero.sh` — node-agent on, `prefix=velero`, no volume snapshots,
+  `--default-volumes-to-fs-backup`
 - Apply `schedule-daily.yaml` and `schedule-weekly.yaml`
-- **Verify the node-agent really reads the volumes:** `velero backup describe <name> --details`
-  must list all six monitoring PVCs under *Pod Volume Backups*. An empty list is a silent
-  total failure that still reports success
-- Confirm the `argocd` namespace backup contains its Secrets and Applications — this is what
-  retires the separate ArgoCD export (#20, #1)
-- Do one test restore into a scratch namespace
-- Confirm old backups actually expire after their TTL (proves `s3:DeleteObject` is granted)
+- **Verify the node-agent really reads the volumes:** `velero backup describe <name> --details` must
+  list all six monitoring PVCs under *Pod Volume Backups*. An empty list is a silent total failure
+  that still reports success
+- Confirm the `argocd` namespace backup contains its Secrets and Applications (retires #20/#1)
+- One test restore into a scratch namespace
+- After a week, confirm old backups actually expire (proves the `velero/` delete permission)
 
 **Answer / Output:**
 ```
@@ -68,18 +96,67 @@ What needs to happen:
 
 ---
 
-### 4. [#1](../../../issues/1) / [#20](../../../issues/20) — ArgoCD recoverability
-**Priority: Medium — decision made, one thing left to verify**
+### 5. [#2](../../../issues/2) — Phase 4: Alerting, and where the heartbeat reports to
+**Priority: Highest of the "medium" items — until this exists, a stopped backup is silent**
 
-**Decided: no separate daily `argocd admin export`.** Velero backs up the whole `argocd` namespace
-including its Secrets, Applications and AppProjects, and Git holds the app definitions. The export
-would be duplicate coverage.
+Three alerts ([02 §7](02-backup-strategy.md#7-knowing-it-works)):
 
-What's left:
-- Confirm every ArgoCD App is defined in Git, not created by hand (anything hand-made can't come
-  back from Git alone — it comes back from Velero)
-- Verify the Velero backup really contains ArgoCD's Secrets and Applications, as part of #11
-- Write down which Git repos/logins ArgoCD depends on
+1. **No Job 1 backup in 26 h** — an off-server heartbeat. **This is the only one that still works
+   when `k3-master` is dead.** The script already pings `HEARTBEAT_URL` after verifying its objects
+   landed in S3; the open question is *what receives it*
+2. Velero's `velero_backup_last_successful_timestamp` going stale — in-cluster
+3. Root disk free under 10% — in-cluster
+
+Options for #1: a hosted dead-man's switch (healthchecks.io / Cronitor, ~5 minutes); AWS EventBridge
+on S3 `ObjectCreated` + a CloudWatch alarm treating missing data as breaching; or an Alertmanager
+hosted outside this cluster.
+
+Then **test all three by deliberately breaking them.**
+
+**Answer / Output:**
+```
+Heartbeat channel chosen:
+HEARTBEAT_URL set on the node:      yes / no
+Alert 1 tested by breaking it:      yes / no
+Alert 2 tested:                     yes / no
+Alert 3 tested:                     yes / no
+```
+
+---
+
+### 6. [#12](../../../issues/12) — Phase 5: Prove a restore works
+**Priority: Medium — turns "hope" into "proof". Nothing before this counts as proven**
+
+Procedure: [03 §C](03-restore-runbook.md#c--the-restore-test).
+
+- Throwaway Ubuntu VM matching `k3-master`, on a different address
+- Install K3s from `k3s-release/` in the bucket rather than `get.k3s.io` — proves the fallback
+- Run §A steps 1–11 end to end
+- Confirm restored **Prometheus answers a query over pre-incident data** — proof the volume restore
+  worked, not just that the pod started
+- Confirm HTTPS comes back valid
+- Run §B once against a scratch namespace
+- Record real timings, fix the runbook to match reality, set the actual RTO
+- Diary the repeat for 3–6 months out
+
+**Answer / Output:**
+```
+Date run:
+Total time (= the real RTO):
+What didn't match the runbook:
+Next due:
+```
+
+---
+
+## Known gaps — the smaller unknowns
+
+### 7. [#4](../../../issues/4) — Where do HTTPS certificates actually come from?
+**Priority: High — read-only, two minutes, and it's the one answer that could change the design**
+
+If Traefik issues its own certificates via ACME and keeps `acme.json` in an `emptyDir`, **nothing
+backs it up** and every restore returns a site with no valid certificate. Commands in
+[07 stage 1.5](07-setup.md#15--where-do-the-https-certificates-come-from-node).
 
 **Answer / Output:**
 ```
@@ -88,18 +165,26 @@ What's left:
 
 ---
 
-### 5. [#2](../../../issues/2) — Phase 3: Retention + alerting
+### 8. [#16](../../../issues/16) — Who can actually perform a restore
+**Priority: High — five minutes of writing things down**
+
+There is deliberately no stored restore credential; restores use a normal AWS admin/SSO login. That
+only works if the access isn't a single point of failure.
+
+**Answer / Output:**
+```
+People who can read s3://k3-master-dr:
+Bucket name + region recorded outside AWS:   yes / no
+Who rotates the backup-writer key, and how often:
+```
+
+---
+
+### 9. [#8](../../../issues/8) — `tls/` and `cred/` never checked file-by-file
 **Priority: Medium**
 
-What needs to happen:
-- Exactly two S3 lifecycle rules: `k3s/daily/` expire 8 days, `k3s/weekly/` expire 31 days
-- **Confirm there is no lifecycle rule on `velero/`** — one would silently corrupt Velero's Kopia
-  repository, and you'd only find out during a restore
-- Alert on the **age of the newest object** under `k3s/daily/` (~36 h threshold) — this proves the
-  backup arrived, unlike the script's own success metric
-- Alert on `velero_backup_last_successful_timestamp`
-- Actually test both alerts by breaking a run on purpose
-- Let both jobs run untouched for one week
+List (names + permissions only, never contents) what's actually inside these two folders, and
+confirm the backup covers everything — including anything sitting loose directly under `server/`.
 
 **Answer / Output:**
 ```
@@ -108,17 +193,19 @@ What needs to happen:
 
 ---
 
-### 6. [#12](../../../issues/12) — Phase 4: Prove a restore works
-**Priority: Medium — turns "hope" into "proof"**
+### 10. [#22](../../../issues/22) — Is K3s encrypting Secrets in its own database?
+**Priority: Medium — read-only check**
 
-What needs to happen:
-- Spin up a throwaway test server matching `k3-master`'s specs
-- Run [restore runbook §A](03-restore-runbook.md#a--full-server-rebuild) end to end
-- Confirm restored Prometheus answers a query over **pre-incident** data — proof the volume
-  restore worked, not just that the pod started
-- Run [§B](03-restore-runbook.md#b--restoring-one-pvc-or-one-object) once against a scratch
-  namespace
-- Record how long each took; fix whatever broke; update the runbook to match reality
+Either answer is fine; `cred/` is backed up regardless. But if it's **on**, restoring
+`cred/encryption-config.json` becomes a hard precondition before starting K3s.
+
+```bash
+sudo k3s secrets-encrypt status
+```
+
+> The other half of this issue — the node-exporter textfile metric — is **closed by removal.** The
+> metric proved the script's own opinion of itself and nothing was confirmed to read it. The
+> heartbeat in #2 replaces it.
 
 **Answer / Output:**
 ```
@@ -127,11 +214,29 @@ What needs to happen:
 
 ---
 
-### 7. [#3](../../../issues/3) — Phase 5: Close remaining unknowns
-**Priority: Low — doesn't block earlier phases**
+### 11. [#19](../../../issues/19) — Certificate expiry dates never captured
+**Priority: Medium — the "what to do about it" part is written, the numbers aren't**
 
-What needs to happen:
-- Work through every gap listed below, one at a time
+The restore runbook explains which certificate errors fix themselves and which don't. What's missing
+is the actual expiry dates from `k3-master` — [07 stage 1.3](07-setup.md#13--look-inside-tls-and-cred-node).
+
+**Answer / Output:**
+```
+CA certificates expire:
+Leaf certificates expire:
+```
+
+---
+
+### 12. [#1](../../../issues/1) / [#20](../../../issues/20) — ArgoCD recoverability
+**Priority: Medium — decided, one thing left to verify**
+
+**Decided: no separate daily `argocd admin export`.** Velero backs up the whole `argocd` namespace
+including its Secrets, Applications and AppProjects, and Git holds the app definitions.
+
+What's left: confirm every ArgoCD App is defined in Git (anything hand-made comes back from Velero,
+not Git), verify the Velero backup really contains ArgoCD's Secrets and Applications as part of #11,
+and write down which Git repos/logins ArgoCD depends on.
 
 **Answer / Output:**
 ```
@@ -140,26 +245,12 @@ What needs to happen:
 
 ---
 
-## Known Gaps — smaller unknowns
+### 13. [#15](../../../issues/15) — Single AWS region, no backup-of-the-backup
+**Priority: Low — decide explicitly rather than by default**
 
-### 8. [#14](../../../issues/14) — Bucket must be encrypted
-**Priority: Highest / Critical**
-
-Secrets reach S3 in plain text unless SSE-KMS encryption is turned on **from the bucket's
-creation**, not added later.
-
-**Answer / Output:**
-```
-(paste here)
-```
-
----
-
-### 9. [#4](../../../issues/4) — Where do HTTPS certificates actually come from?
-**Priority: Medium / High**
-
-Need to check if Traefik's certificates are Kubernetes Secrets, or issued automatically via
-`acme.json` (and if so, whether that file lives on disk or in temporary storage).
+Reasonable for one server with no failover. Related decision already on the record: we protect
+against host loss and a compromised `k3-master`, **not** a compromised AWS account
+([02 §9](02-backup-strategy.md#9-the-immutability-decision--made-and-on-the-record)).
 
 **Answer / Output:**
 ```
@@ -168,61 +259,10 @@ Need to check if Traefik's certificates are Kubernetes Secrets, or issued automa
 
 ---
 
-### 10. [#5](../../../issues/5) / [#6](../../../issues/6) — Server OS-level settings not backed up
-**Priority: Medium — resolved in the design, needs one confirming run**
+### 14. [#13](../../../issues/13) — Who hosts this server?
+**Priority: Low — resolved**
 
-Network settings, firewall rules, SSH keys, timezone and the installed-package list are now
-captured by job 1 as `node-config.tar.gz`, in the same folder as everything else — no separate job,
-no separate prefix. Confirm the file appears in the first real backup and contains what you expect.
-
-**Answer / Output:**
-```
-(paste here)
-```
-
----
-
-### 11. [#8](../../../issues/8) — `tls/` and `cred/` folders never checked file-by-file
-**Priority: Medium / High**
-
-Need to list (names + permissions only, never contents) what's actually inside these two
-folders, and confirm the backup script covers everything.
-
-**Answer / Output:**
-```
-(paste here)
-```
-
----
-
-### 12. [#13](../../../issues/13) — Who hosts this server?
-**Priority: Low — mostly resolved**
-
-Already answered: Datalix, treated as on-premise, no snapshot fallback available.
-
-**Answer / Output:**
-```
-(paste here)
-```
-
----
-
-### 13. [#6](../../../issues/6) — Installed system software list not saved
-**Priority: Low**
-
-Add `dpkg --get-selections` output to the node-config backup.
-
-**Answer / Output:**
-```
-(paste here)
-```
-
----
-
-### 14. [#15](../../../issues/15) — Single AWS region, no backup-of-the-backup
-**Priority: Low**
-
-Decide explicitly: is one region acceptable, or do we need cross-region copies too?
+Datalix, treated as on-premise, no snapshot fallback available.
 
 **Answer / Output:**
 ```
@@ -232,9 +272,7 @@ Decide explicitly: is one region acceptable, or do we need cross-region copies t
 ---
 
 ### 15. [#7](../../../issues/7) — Documentation must not live only on the server
-**Priority: Low — already resolved**
-
-Already fixed: this GitHub repo is the one true copy.
+**Priority: Low — resolved.** This GitHub repo is the one true copy.
 
 **Answer / Output:**
 ```
@@ -243,137 +281,32 @@ Already fixed: this GitHub repo is the one true copy.
 
 ---
 
-### 16. [#16](../../../issues/16) — No owner for credential rotation
-**Priority: Low**
+## Closed by the simplified design — no action needed
 
-Assign one specific person + a schedule (suggested: every 90 days) to rotate the backup
-login credentials.
+These no longer need answering, because the thing they were about is gone. Kept so nobody reopens
+them.
 
-**Answer / Output:**
-```
-(paste here)
-```
-
----
-
-## Found during a K3s review — newer issues
-
-### 17. [#17](../../../issues/17) — Backups never recorded which K3s version made them
-**Priority: Highest — fixed in code, not yet deployed**
-
-Fixed by writing a `MANIFEST.json` into every backup run's folder, recording the K3s version, the
-OS release and every file's checksum. It now lives beside the files it describes rather than in its
-own prefix, so it can't expire before them. Still needs to be deployed to `k3-master` and confirmed
-working.
-
-**Answer / Output:**
-```
-(paste here)
-```
+| Issue | Why it's closed |
+|-------|-----------------|
+| [#14](../../../issues/14) — bucket must be encrypted | Default **SSE-S3** from creation. No key to create, rotate, or lose |
+| [#21](../../../issues/21) — the 64 MB multipart upload failed | It failed for want of `kms:Decrypt`. There is no KMS any more, so neither the failure nor its test exists |
+| [#24](../../../issues/24) — a bare KMS key id denied every upload | Same: no `KMS_KEY_ID` in the config at all |
+| [#5](../../../issues/5) / [#6](../../../issues/6) — host OS settings not backed up | Captured as a plain-text fact sheet in the archive. `/etc/ssh` and `authorized_keys` are deliberately **not** captured |
+| [#17](../../../issues/17) — backups didn't record their K3s version | `MANIFEST.json`, beside the archive and inside it, with the version and the real start command. Verify once in #3 |
+| [#23](../../../issues/23) — which files belong to the same run | One archive per run. The question no longer arises |
+| [#18](../../../issues/18) — the runbook assumed tools that didn't exist | Every flow names what must be installed first |
 
 ---
 
-### 18. [#18](../../../issues/18) — Restore runbook assumed tools that don't exist yet
-**Priority: Medium — fixed**
+## Suggested order
 
-Fixed by adding a "what this runbook can actually do today" table and marking restore steps 8
-and 9 (Velero restore, ArgoCD import) as blocked until Issue #11 is done.
-
-**Answer / Output:**
-```
-(paste here)
-```
-
----
-
-### 19. [#19](../../../issues/19) — Nobody wrote down how K3s certificates expire
-**Priority: Medium — fixed**
-
-Fixed by adding a "normal vs. real problem" table for certificate errors during restore, and a
-warning never to regenerate the master certificate. Still need to actually capture the real
-expiry dates from `k3-master` (Stage B.1 in doc 07) — nobody has run that check yet.
-
-**Answer / Output:**
-```
-(paste here)
-```
-
----
-
-### 20. [#20](../../../issues/20) — Do we actually need the ArgoCD settings export?
-**Priority: Medium — DECIDED: no**
-
-Velero backs up the whole `argocd` namespace including Secrets, Applications and AppProjects, and
-Git holds the app definitions. A separate daily export is duplicate coverage for one more scheduled
-job. Removed from the design.
-
-The one thing to verify, during #11: that the Velero backup really does contain ArgoCD's Secrets
-and Applications. If it somehow doesn't, reopen this.
-
-**Answer / Output:**
-```
-(paste here)
-```
-
----
-
-### 21. [#21](../../../issues/21) — Backup login couldn't actually upload our database file
-**Priority: Critical — fixed**
-
-The server's backup login was given no `kms:Decrypt` permission (reasoning: it only ever writes,
-never reads). But any file over 8 MB uploads as a **multi-part** upload, and multi-part uploads
-to an encrypted bucket need `kms:Decrypt` too. Our database backup is ~64 MB — so **every real
-backup would have failed** with `AccessDenied`, while the small test file in Stage D would have
-passed and hidden the problem until the first real backup.
-
-Fixed by adding `kms:Decrypt` (scoped to just our one key) and changing the Stage D test to
-upload a 64 MB file instead of a tiny one.
-
-**Answer / Output:**
-```
-(paste here)
-```
-
----
-
-### 22. [#22](../../../issues/22) — Two things that can only be checked on the server
-**Priority: High / Medium — read-only checks, waiting on someone running them**
-
-Two separate questions bundled under one issue:
-
-- **Does our "backup succeeded" signal go anywhere?** The script writes a success metric to
-  `/var/lib/node_exporter/textfile_collector` — but we never confirmed node-exporter is even
-  installed, or that this folder is reachable. If not, the signal goes nowhere and Phase 3
-  alerting would be built on a hook that does nothing.
-- **Is K3s encrypting Secrets inside its own database?** If yes, there's a key file
-  (`cred/encryption-config.json`) that's required to read any Secret after a restore. We already
-  back up all of `cred/` either way — this is about knowing, not about coverage.
-
-Both have read-only checks waiting in [07 Stage B.1a/B.1b](07-phase-0-1-execution.md) — nobody's
-run them on `k3-master` yet.
-
-**Answer / Output:**
-```
-(paste here)
-```
-
----
-
-## Suggested order to work through this
-
-1. [#4](../../../issues/4) — **check the Traefik certificates first.** It's read-only, takes two
-   minutes, and it's the one answer that could change the design. If `acme.json` sits in an
-   `emptyDir`, nothing here backs it up and every restore comes back with broken HTTPS
-2. [#9](../../../issues/9) + [#14](../../../issues/14) — bucket, encryption key and both logins.
-   Encryption must be on **at creation**, not added afterwards
-3. [#21](../../../issues/21) — prove the writer login can do a 64 MB multipart upload
-4. [#10](../../../issues/10) + [#17](../../../issues/17) — deploy job 1 and confirm `MANIFEST.json`
-   records a real K3s version
+1. [#4](../../../issues/4) — **check the Traefik certificates first.** Read-only, two minutes, and
+   the one answer that could change the design
+2. [#3](../../../issues/3) — agree the RPO and RTO while you're still deciding things
+3. [#9](../../../issues/9) — the rest of the validation
+4. [#10](../../../issues/10) — bucket, credential, Job 1
 5. [#11](../../../issues/11) — **install Velero.** Until this exists, a deleted PVC is permanent
-6. [#22](../../../issues/22) — the two read-only checks (node-exporter present? K3s secret encryption
-   on?)
-7. [#1](../../../issues/1) — confirm every ArgoCD App is defined in Git ([#20](../../../issues/20) is
-   already decided)
-8. [#2](../../../issues/2) — retention rules + backup-arrived alerting
-9. [#12](../../../issues/12) — **test both restore flows.** Nothing before this counts as proven
-10. Everything else in [#3](../../../issues/3) — the smaller gaps (#8, #13, #15, #16, #19)
+6. [#2](../../../issues/2) — pick the heartbeat channel and wire all three alerts
+7. [#12](../../../issues/12) — **test a restore.** Nothing before this counts as proven
+8. [#16](../../../issues/16), [#8](../../../issues/8), [#22](../../../issues/22),
+   [#19](../../../issues/19), [#1](../../../issues/1), [#15](../../../issues/15) — the rest

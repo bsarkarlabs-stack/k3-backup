@@ -1,0 +1,10 @@
+# Everything in scripts/ is copied onto k3-master and run by bash or read by
+# systemd. With CRLF line endings bash fails with "bad interpreter: ^M" and
+# systemd silently mis-parses the unit — during setup, or worse, during a
+# restore. Force LF on checkout regardless of the developer's platform.
+*.sh              text eol=lf
+*.yaml            text eol=lf
+scripts/systemd/* text eol=lf
+
+# Docs are read, not executed, but keeping them uniform avoids noisy diffs.
+*.md              text eol=lf

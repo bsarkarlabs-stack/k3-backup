@@ -12,14 +12,16 @@
 #   * Nothing else. The two Schedule objects are applied separately so they
 #     can be edited without touching the install.
 #
-# Prerequisites: the same bucket and KMS key job 1 uses, and a credentials
-# file for the backup identity. See docs/02-backup-strategy.md §2.
+# Encryption is the bucket's own default (SSE-S3), so nothing is passed here —
+# S3 encrypts every object on arrival. See docs/02-backup-strategy.md §3.
+#
+# Prerequisites: the same bucket job 1 uses, and a credentials file holding the
+# backup identity.
 
 set -euo pipefail
 
 : "${S3_BUCKET:?set S3_BUCKET, e.g. export S3_BUCKET=k3-master-dr}"
 : "${AWS_REGION:?set AWS_REGION, e.g. export AWS_REGION=ap-south-1}"
-: "${KMS_KEY_ID:?set KMS_KEY_ID to the full key ARN}"
 : "${CREDS_FILE:?set CREDS_FILE to a file holding the AWS credentials block}"
 
 # Pin both versions. An unpinned install means the plugin and the server can
@@ -46,7 +48,7 @@ velero install \
   --bucket "$S3_BUCKET" \
   --prefix velero \
   --secret-file "$CREDS_FILE" \
-  --backup-location-config "region=${AWS_REGION},serverSideEncryption=aws:kms,kmsKeyId=${KMS_KEY_ID}" \
+  --backup-location-config "region=${AWS_REGION}" \
   --use-node-agent \
   --default-volumes-to-fs-backup \
   --uploader-type kopia \
@@ -64,4 +66,4 @@ echo "  velero backup create verify-\$(date +%s) --wait"
 echo "  velero backup describe <name> --details    # confirm all 6 PVCs listed under 'Pod Volume Backups'"
 echo
 echo "If 'Pod Volume Backups' is empty, the node-agent is not reading the"
-echo "kubelet root correctly — see docs/02-backup-strategy.md §9, gap 2."
+echo "kubelet root correctly — see docs/05-gaps-and-open-questions.md."
