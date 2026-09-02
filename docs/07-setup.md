@@ -131,6 +131,21 @@ sudo /usr/local/sbin/k3s-backup-preflight.sh --no-aws
 Use `--no-aws` this first time — the bucket doesn't exist yet. It'll tell you what's missing
 locally so you aren't creating AWS resources only to find the server can't use them.
 
+**Keep a copy of the output.** To see it on screen *and* save a log you can re-read or hand over,
+tee it to a file. Set `pipefail` first so the checker's exit code survives the pipe rather than
+being replaced by `tee`'s:
+
+```bash
+set -o pipefail
+sudo /usr/local/sbin/k3s-backup-preflight.sh --no-aws 2>&1 \
+  | tee ~/k3s-preflight-$(date +%F-%H%M).log
+echo "Exit code: ${PIPESTATUS[0]}"
+```
+
+`2>&1` folds warnings and errors into the same log so nothing is lost, and the `Exit code:` line is
+the number the table below reads — not `tee`'s. Read the saved log back with `cat
+~/k3s-preflight-*.log`, and send that file if you want someone else to check it.
+
 | Exit | Meaning |
 |------|---------|
 | `0` — READY | Everything checks out |
