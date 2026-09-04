@@ -218,12 +218,14 @@ sudo find /var/lib/rancher/k3s/server -maxdepth 1 -type f -printf '%M %10s %p\n'
 folders whole, so if you spot a stray `.key`, `.crt` or `-ca.` file sitting *directly* under
 `server/`, record it in [05](05-gaps-and-open-questions.md) and add it to the script's path list.
 
-While you're here, write down **when the certificates expire**. This reads expiry dates only:
+While you're here, write down **when the certificates expire**. This reads expiry dates only, and
+recurses so certificates in subdirectories (for example `tls/etcd/`) aren't missed:
 
 ```bash
-for c in /var/lib/rancher/k3s/server/tls/*.crt; do
-  printf '%-58s ' "$(basename "$c")"
-  sudo openssl x509 -enddate -noout -in "$c" 2>/dev/null || echo "couldn't read"
+sudo find /var/lib/rancher/k3s/server/tls -type f -name "*.crt" -print0 |
+while IFS= read -r -d "" c; do
+  printf "%-80s " "${c#/var/lib/rancher/k3s/server/tls/}"
+  sudo openssl x509 -enddate -noout -in "$c" 2>/dev/null || echo "could not read"
 done
 ```
 
