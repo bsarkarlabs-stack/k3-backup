@@ -73,6 +73,23 @@ required of you that isn't a step below.
 about to type `systemctl restart k3s`, you've gone off-script — stop. Keep a second SSH session
 open the whole time. Go top to bottom; later steps depend on earlier ones.
 
+**Record the whole session, so every step's output is saved.** Only a few steps below pipe their own
+output to a log; the rest (1.2, 1.3, the stage-4 checks, and so on) just print to screen. Rather than
+add `tee` to every command, capture the entire session **once** with `script` — it saves everything
+you see, from every step, into one transcript file you can re-read or hand over:
+
+```bash
+# [node] — run this first thing after you SSH in, before step 1.1
+script -q ~/k3s-setup-$(date +%F-%H%M).log
+# ...now run every step normally; all output is being recorded...
+exit            # stops recording and closes the transcript
+```
+
+Do the same on `[local]` for the AWS stage if you want those captured too. Read a transcript back
+with `cat ~/k3s-setup-*.log`, and send that file if you want someone to review what happened. The
+per-command `tee` in step 1.1 is still fine on its own — with `script` running, it simply means the
+preflight also gets its own separate log.
+
 The safety claim that matters, stated plainly so you can verify it yourself: **the datastore
 backup uses SQLite's built-in online backup API through a read-only connection, and because SQLite
 is in WAL mode this never blocks anything else writing to the database.** A plain file copy would
@@ -116,24 +133,34 @@ For the full picture of which credential and file belongs on which machine, read
 
 ### 1.1 — Run the preflight checker `[node]`
 
-**Do this before anything else.** One command, changes nothing, answers "is everything actually in
-place?" in about 30 seconds.
+**Do this before anything else.** Changes nothing, answers "is everything actually in place?" in
+about 30 seconds.
+
+**First, get the script onto the server.** Pick whichever matches how you have the repo:
 
 ```bash
-scp scripts/k3s-backup-preflight.sh <user>@45.90.98.51:/tmp/     # from [local]
+# If you cloned this repo onto k3-master already, it's the file in the clone:
+#   ~/poc-k3-backup/k3s-backup-preflight.sh   (adjust to your clone path)
+
+# If the repo is only on your laptop, copy it over from [local]:
+scp scripts/k3s-backup-preflight.sh <user>@45.90.98.51:/tmp/
 ```
+
+**Then install it** to `/usr/local/sbin/` as root. Use the path where the file actually is — the
+repo clone, or `/tmp` if you scp'd it. Spelling out the full destination filename avoids any doubt
+about where it lands:
 
 ```bash
-sudo install -m 0750 -o root -g root /tmp/k3s-backup-preflight.sh /usr/local/sbin/
-sudo /usr/local/sbin/k3s-backup-preflight.sh --no-aws
+sudo install -m 0750 -o root -g root \
+  ~/poc-k3-backup/k3s-backup-preflight.sh \
+  /usr/local/sbin/k3s-backup-preflight.sh
 ```
 
-Use `--no-aws` this first time — the bucket doesn't exist yet. It'll tell you what's missing
-locally so you aren't creating AWS resources only to find the server can't use them.
-
-**Keep a copy of the output.** To see it on screen *and* save a log you can re-read or hand over,
-tee it to a file. Set `pipefail` first so the checker's exit code survives the pipe rather than
-being replaced by `tee`'s:
+**Then run it.** Use `--no-aws` this first time — the bucket doesn't exist yet, and this tells you
+what's missing locally so you aren't creating AWS resources only to find the server can't use them.
+This one command both shows the output on screen **and** saves a log you can re-read or hand over.
+`set -o pipefail` makes the checker's real exit code survive the pipe instead of being replaced by
+`tee`'s:
 
 ```bash
 set -o pipefail
@@ -144,7 +171,9 @@ echo "Exit code: ${PIPESTATUS[0]}"
 
 `2>&1` folds warnings and errors into the same log so nothing is lost, and the `Exit code:` line is
 the number the table below reads — not `tee`'s. Read the saved log back with `cat
-~/k3s-preflight-*.log`, and send that file if you want someone else to check it.
+~/k3s-preflight-*.log`, and send that file if you want someone else to check it. (If you just want a
+quick look with no log, `sudo /usr/local/sbin/k3s-backup-preflight.sh --no-aws` on its own works
+too.)
 
 | Exit | Meaning |
 |------|---------|
