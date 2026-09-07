@@ -854,11 +854,20 @@ The script verifies its own uploads and will fail loudly if an object didn't lan
 size, so a clean exit is already meaningful. Confirm independently anyway:
 
 ```bash
-set -a; . /etc/k3s-backup/backup.env; set +a
+# backup.env is 0600 root:root, so both source it AND run aws inside one root shell.
 # Prefix-scoped: the Job 1 key cannot list the bucket root.
-sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/k3s/" --recursive --human-readable
-sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/k3s-release/" --recursive --human-readable
+sudo bash -c '
+  set -a; . /etc/k3s-backup/backup.env; set +a
+  AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/k3s/"         --recursive --human-readable
+  AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/k3s-release/" --recursive --human-readable
+'
 ```
+
+> **Load the env inside the root shell, not before `sudo`.** `/etc/k3s-backup/backup.env` is
+> `0600 root:root`, so `. /etc/k3s-backup/backup.env` as your normal user gives `Permission denied`
+> and leaves `$AWS_REGION`/`$S3_BUCKET` empty — the AWS CLI then builds a malformed
+> `https://s3..amazonaws.com` endpoint. Sourcing it inside `sudo bash -c '...'` reads the file as
+> root, so no `sudo -E` is needed.
 
 ```text
 k3s/daily/2026-09-02T021500Z/COMPLETE.json
@@ -1326,23 +1335,31 @@ systemctl list-timers 'k3s-backup*' 'velero-backup-check*' --no-pager
 journalctl -u k3s-backup.service --since '24 hours ago' --no-pager | tail -30
 df -h /
 
-set -a; . /etc/k3s-backup/backup.env; set +a
-sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/k3s/daily/" | tail -8
+# backup.env is 0600 root:root — source it and run aws in the same root shell.
+sudo bash -c '
+  set -a; . /etc/k3s-backup/backup.env; set +a
+  AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/k3s/daily/" | tail -8
+'
 ```
 
 Expect one new dated folder per day, one more under `k3s/weekly/` after the first Sunday, and S3
 usage flat at roughly 200 MB once the lifecycle rules start expiring things.
 
-> Every `aws` command here needs that `set -a; . backup.env; set +a` line first — it's what puts the
-> credentials and bucket name into the shell. Without it you get `Unable to locate credentials`,
-> which looks like a permissions problem and isn't.
+> **Why `sudo bash -c '...'` and not `set -a; . backup.env` first.** `/etc/k3s-backup/backup.env` is
+> `0600 root:root`. Sourcing it as your normal user gives `Permission denied` and leaves
+> `$AWS_REGION`/`$S3_BUCKET` empty, so the CLI either builds a broken `https://s3..amazonaws.com`
+> endpoint or reports `Unable to locate credentials`. Reading the file *inside* the root shell fixes
+> both, and needs no `sudo -E`.
 
 **One check that can only happen on a Sunday:** after the first weekend, confirm Job 1 wrote the
 same committed set under `k3s/weekly/` and that Velero ran the weekly Schedule rather than the daily
 one.
 
 ```bash
-sudo -E AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/k3s/weekly/"
+sudo bash -c '
+  set -a; . /etc/k3s-backup/backup.env; set +a
+  AWS_DEFAULT_REGION="$AWS_REGION" aws s3 ls "s3://$S3_BUCKET/k3s/weekly/"
+'
 velero backup get -l velero.io/schedule-name=weekly
 ```
 
