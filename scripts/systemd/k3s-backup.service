@@ -23,11 +23,19 @@ TimeoutStartSec=1800
 
 # Minimal hardening. NOT ProtectSystem/PrivateTmp-strict: the script must
 # read /var/lib/rancher/k3s and /etc, and write /var/backups/k3s.
+#
+# Deliberately NO RestrictSUIDSGID / LockPersonality / SystemCallFilter: each of
+# those makes systemd install a seccomp filter, and on a host whose libseccomp is
+# older than the kernel that filter returns ENOSYS for syscalls it doesn't
+# recognise — including statx(), which modern GNU tar uses. The symptom is
+#   tar: var/lib/rancher/k3s/server/tls: Cannot stat: Function not implemented
+# and a failed backup, even though running the script by hand (no seccomp filter)
+# works fine. These directives add little for a trusted root-owned oneshot, so we
+# drop them rather than risk the backup silently breaking on some hosts. The
+# protections kept below are namespace/prctl based and install no seccomp filter.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=read-only
-RestrictSUIDSGID=yes
-LockPersonality=yes
 
 [Install]
 WantedBy=multi-user.target

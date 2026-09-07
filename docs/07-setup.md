@@ -982,6 +982,16 @@ sudo journalctl -u k3s-backup.service -n 40 --no-pager
 
 **Check:** `status=0/SUCCESS`, and the log ends with `completed successfully`.
 
+> **If it fails with `tar: … Cannot stat: Function not implemented`** while the script works when run
+> by hand: that's a seccomp mismatch, not a bug in the backup. systemd installs a seccomp filter for
+> hardening directives like `RestrictSUIDSGID=`/`LockPersonality=`, and on a host whose `libseccomp`
+> is older than the kernel that filter returns `ENOSYS` for `statx()`, which GNU `tar` uses. The
+> shipped unit deliberately omits those directives, so first make sure the installed unit matches the
+> repo (`sudo install -m 0644 -o root -g root /tmp/k3s-backup.service /etc/systemd/system/` then
+> `sudo systemctl daemon-reload`) and re-run. If you keep a hardened variant, `sudo apt-get install
+> --only-upgrade libseccomp2` (so it knows `statx`) is the alternative fix. Then clear the failed
+> run's leftover stage dir: `sudo sh -c 'rm -rf /var/backups/k3s/*/'`.
+
 Only now:
 
 ```bash
@@ -998,6 +1008,37 @@ before the 03:30 UTC Velero window. The script also takes a lock, so two Job 1 r
 
 **This is half the design, not an optional extra.** Job 1 cannot restore a deleted PVC or a single
 deleted Secret, and `local-path` destroys a volume's files the instant its PVC goes away.
+
+> **You can run all of Stage 4 on the node — and it's easier there.** The steps below are tagged
+> `[local]`, but "local" here just means *a shell with the Velero CLI and a cluster-admin kubeconfig*
+> — which the node already is. The installer supports it explicitly ("from your laptop or from the
+> node"), the repo is already cloned on `k3-master`, and the Velero key ends up as a Secret in this
+> node's datastore anyway, so creating `velero-credentials` here and shredding it after adds no
+> exposure. If you run Stage 4 on the node, do this **one-time setup first**, then run every `[local]`
+> step in Stage 4 exactly as written:
+>
+> ```bash
+> # 1. Install the Velero CLI v1.18.0 on the node (adjust arch if not amd64):
+> VELERO_VERSION=v1.18.0
+> curl -fsSL -o /tmp/velero.tgz \
+>   "https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz"
+> tar -xzf /tmp/velero.tgz -C /tmp
+> sudo install -m 0755 "/tmp/velero-${VELERO_VERSION}-linux-amd64/velero" /usr/local/bin/velero
+> velero version --client-only        # v1.18.0
+>
+> # 2. Point velero/kubectl at the cluster (k3s.yaml is root-readable, targets 127.0.0.1:6443):
+> export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+> sudo -E kubectl get nodes           # k3-master Ready  (sudo -E keeps KUBECONFIG)
+> ```
+>
+> `install-velero.sh` also auto-detects `/etc/rancher/k3s/k3s.yaml` when it's run as root with
+> `KUBECONFIG` unset, so the install works even if you skip the `export`; setting it anyway is what
+> makes the *verification* `velero`/`kubectl` commands in 4.2–4.6 work in the same shell.
+>
+> Two node-specific notes for the commands that follow: run `velero` and `kubectl` with `sudo -E`
+> (so they inherit `KUBECONFIG`), or copy `k3s.yaml` to `~/.kube/config` once; and wherever a step
+> says `kubectl`, `sudo k3s kubectl` is the built-in equivalent if you'd rather not install
+> `kubectl`. Everything else in Stage 4 is identical.
 
 ### 4.1 — Find the kubelet root `[node]`
 
@@ -1024,9 +1065,9 @@ kubectl get nodes                  # k3-master Ready
 The installer pins AWS plugin `v1.14.1`, the compatible plugin series for Velero `v1.18.x`.
 
 Now the **Velero** access key from 2.5 comes into play — the `k3-master-velero` pair, which is
-different from the Job 1 key in `backup.env`. It goes into a short-lived file on your laptop that
-the installer turns into a Kubernetes Secret; you shred the file straight after. It is never written
-to `backup.env` and never committed.
+different from the Job 1 key in `backup.env`. It goes into a short-lived file (on whichever machine
+you're running this stage from — laptop or node) that the installer turns into a Kubernetes Secret;
+you shred the file straight after. It is never written to `backup.env` and never committed.
 
 ```bash
 cat > ./velero-credentials <<'EOF'

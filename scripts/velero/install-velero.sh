@@ -20,6 +20,16 @@
 
 set -euo pipefail
 
+# When run on the node, k3s writes a cluster-admin kubeconfig here. If the caller
+# hasn't set KUBECONFIG and this file is readable (i.e. you're running as root,
+# e.g. under sudo -E), use it so the install works from the node with no extra
+# setup. It targets https://127.0.0.1:6443. On a laptop this is simply skipped
+# and your normal ~/.kube/config or KUBECONFIG is used.
+if [ -z "${KUBECONFIG:-}" ] && [ -r /etc/rancher/k3s/k3s.yaml ]; then
+  export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+  echo "using KUBECONFIG=/etc/rancher/k3s/k3s.yaml (k3s node default)"
+fi
+
 : "${S3_BUCKET:?set S3_BUCKET, e.g. export S3_BUCKET=k3-master-dr}"
 : "${AWS_REGION:?set AWS_REGION, e.g. export AWS_REGION=ap-south-1}"
 : "${CREDS_FILE:?set CREDS_FILE to a file holding the AWS credentials block}"
