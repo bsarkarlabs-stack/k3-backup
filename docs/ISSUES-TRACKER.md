@@ -87,7 +87,7 @@ Commands: [07 steps 4.1–4.6](07-setup.md#stage-4--deploy-job-2-velero).
   list all six monitoring PVCs under *Pod Volume Backups*. An empty list is a silent total failure
   that still reports success
 - Confirm the `argocd` namespace backup contains its Secrets and Applications (retires #20/#1)
-- One object restore into a scratch namespace ([07 step 4.5](07-setup.md#45--prove-one-narrow-restore-local)).
+- One object restore into a scratch namespace ([07 step 4.5](07-setup.md#45--prove-one-narrow-restore)).
   Do **not** delete a production PVC during setup — that proof belongs in the restore test
 - After a week, confirm old backups actually expire (proves the `velero/` delete permission)
 
@@ -246,7 +246,7 @@ including its Secrets, Applications and AppProjects, and Git holds the app defin
 What's left: confirm every ArgoCD App is defined in Git (anything hand-made comes back from Velero,
 not Git), verify the Velero backup really contains ArgoCD's Secrets and Applications as part of #11,
 and write down which Git repos/logins ArgoCD depends on. All three happen in
-[07 step 4.4](07-setup.md#44--confirm-object-coverage-including-argocd-local).
+[07 step 4.4](07-setup.md#44--confirm-object-coverage-including-argocd).
 
 **Answer / Output:**
 ```

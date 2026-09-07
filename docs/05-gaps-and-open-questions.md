@@ -126,7 +126,7 @@ through a hostPath into the kubelet root directory, and K3s does not always use 
 nothing** — the result looks like an empty backup rather than an error, and the backup is still
 marked `Completed`.
 
-**To close:** [07 step 4.3](07-setup.md#43--prove-the-node-agent-actually-reads-the-volumes-local) —
+**To close:** [07 step 4.3](07-setup.md#43--prove-the-node-agent-actually-reads-the-volumes) —
 after installing Velero, run a backup and check it directly:
 
 ```bash

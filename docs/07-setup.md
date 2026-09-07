@@ -12,7 +12,7 @@ Five stages, in order:
 | [1](#stage-1--validate-the-server) | Validate — is everything we assumed still true? | 1.1–1.7 | `[node]` | **None** — read-only |
 | [2](#stage-2--create-the-bucket-and-two-scoped-workload-credentials) | Create the bucket and two scoped AWS credentials | 2.1–2.7 | `[local]` | **None** — doesn't touch the server |
 | [3](#stage-3--deploy-job-1) | Deploy Job 1: the K3s backup + timer | 3.1–3.8 | `[node]` | **Very low** — only reads K3s's data |
-| [4](#stage-4--deploy-job-2-velero) | Deploy Job 2: Velero, and prove it reads the volumes | 4.1–4.6 | `[local]` | Low — installs into the cluster |
+| [4](#stage-4--deploy-job-2-velero) | Deploy Job 2: Velero, and prove it reads the volumes | 4.1–4.6 | `[node]` | Low — installs into the cluster |
 | [5](#stage-5--monitoring-and-the-restore-test) | Wire and test the four alerts, then prove a restore works | 5.1–5.7 | both | **None** |
 
 **Every step is tagged with where you run it.** Get this wrong and commands fail in confusing ways,
@@ -55,12 +55,12 @@ required of you that isn't a step below.
 | [3.6](#36--first-real-run-node) | First real run; confirm the committed set in S3 | `[node]` | — |
 | [3.7](#37--verify-the-archive-off-the-server-local) | Download it and verify the integrity chain | `[local]` | Practises the restore-time check while nothing is on fire |
 | [3.8](#38--turn-the-schedule-on-node) | Enable the timer | `[node]` | — |
-| [4.1](#41--find-the-kubelet-root-node) | Find K3s's kubelet root | `[node]` | A mismatch backs up **nothing** and still says `Completed` |
-| [4.2](#42--install-velero-local) | Install Velero and apply both schedules; record the versions | `[local]` | — |
-| [4.3](#43--prove-the-node-agent-actually-reads-the-volumes-local) | Prove all six PVCs appear as Pod Volume Backups | `[local]` | [gap 6](05-gaps-and-open-questions.md#6-whether-veleros-node-agent-can-actually-read-our-volumes) — the likeliest silent failure |
-| [4.4](#44--confirm-object-coverage-including-argocd-local) | Confirm cluster-scoped objects and the `argocd` namespace | `[local]` | What retires a separate ArgoCD export |
-| [4.5](#45--prove-one-narrow-restore-local) | Restore one object into a scratch namespace | `[local]` | The 10-minute flow you'll actually use most |
-| [4.6](#46--a-week-later-confirm-backups-expire-local) | A week later: confirm old backups expire | `[local]` | Proves Velero's delete permission is right |
+| [4.1](#41--find-the-kubelet-root) | Find K3s's kubelet root | `[node]` | A mismatch backs up **nothing** and still says `Completed` |
+| [4.2](#42--install-velero) | Install Velero on the node and apply both schedules; record the versions | `[node]` | — |
+| [4.3](#43--prove-the-node-agent-actually-reads-the-volumes) | Prove all six PVCs appear as Pod Volume Backups | `[node]` | [gap 6](05-gaps-and-open-questions.md#6-whether-veleros-node-agent-can-actually-read-our-volumes) — the likeliest silent failure |
+| [4.4](#44--confirm-object-coverage-including-argocd) | Confirm cluster-scoped objects and the `argocd` namespace | `[node]` | What retires a separate ArgoCD export |
+| [4.5](#45--prove-one-narrow-restore) | Restore one object into a scratch namespace | `[node]` | The 10-minute flow you'll actually use most |
+| [4.6](#46--a-week-later-confirm-backups-expire) | A week later: confirm old backups expire | `[node]` | Proves Velero's delete permission is right |
 | [5.1](#51--choose-the-two-dead-man-checks-local) | Create two external dead-man checks | `[local]` | [gap 2](05-gaps-and-open-questions.md#2-the-external-heartbeats-have-nowhere-to-report-yet) — alerts 1 and 2 |
 | [5.2](#52--wire-job-1s-heartbeat-node) | Set `HEARTBEAT_URL` and confirm the ping | `[node]` | Alert 1 |
 | [5.3](#53--install-the-velero-verifier-and-its-heartbeat-node) | Install the verifier, its timer and `MIN_EXPECTED_PVBS` | `[node]` | Alerts 2 and 3 |
@@ -1009,197 +1009,257 @@ before the 03:30 UTC Velero window. The script also takes a lock, so two Job 1 r
 **This is half the design, not an optional extra.** Job 1 cannot restore a deleted PVC or a single
 deleted Secret, and `local-path` destroys a volume's files the instant its PVC goes away.
 
-> **You can run all of Stage 4 on the node — and it's easier there.** The steps below are tagged
-> `[local]`, but "local" here just means *a shell with the Velero CLI and a cluster-admin kubeconfig*
-> — which the node already is. The installer supports it explicitly ("from your laptop or from the
-> node"), the repo is already cloned on `k3-master`, and the Velero key ends up as a Secret in this
-> node's datastore anyway, so creating `velero-credentials` here and shredding it after adds no
-> exposure. If you run Stage 4 on the node, do this **one-time setup first**, then run every `[local]`
-> step in Stage 4 exactly as written:
->
-> ```bash
-> # 1. Install the Velero CLI v1.18.0 on the node (adjust arch if not amd64):
-> VELERO_VERSION=v1.18.0
-> curl -fsSL -o /tmp/velero.tgz \
->   "https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz"
-> tar -xzf /tmp/velero.tgz -C /tmp
-> sudo install -m 0755 "/tmp/velero-${VELERO_VERSION}-linux-amd64/velero" /usr/local/bin/velero
-> velero version --client-only        # v1.18.0
->
-> # 2. Point velero/kubectl at the cluster (k3s.yaml is root-readable, targets 127.0.0.1:6443):
-> export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-> sudo -E kubectl get nodes           # k3-master Ready  (sudo -E keeps KUBECONFIG)
-> ```
->
-> `install-velero.sh` also auto-detects `/etc/rancher/k3s/k3s.yaml` when it's run as root with
-> `KUBECONFIG` unset, so the install works even if you skip the `export`; setting it anyway is what
-> makes the *verification* `velero`/`kubectl` commands in 4.2–4.6 work in the same shell.
->
-> Two node-specific notes for the commands that follow: run `velero` and `kubectl` with `sudo -E`
-> (so they inherit `KUBECONFIG`), or copy `k3s.yaml` to `~/.kube/config` once; and wherever a step
-> says `kubectl`, `sudo k3s kubectl` is the built-in equivalent if you'd rather not install
-> `kubectl`. Everything else in Stage 4 is identical.
+**One rule for all of Stage 4: do everything on `k3-master`, over SSH. Don't use your laptop.** Every
+step below is written the same way — *what it does*, the *command*, and the *expected output*, with
+"go on / stop" at the end. Two fixed conventions so nothing branches:
 
-### 4.1 — Find the kubelet root `[node]`
+- Run Velero as **`sudo -E velero …`** — it reads the kubeconfig you export once in 4.2.
+- Run Kubernetes commands as **`sudo k3s kubectl …`** — K3s's built-in client, nothing to install.
 
-Velero's file-system backup reads pod volumes through a hostPath into the kubelet root. K3s does not
-always use the stock `/var/lib/kubelet`, and **a mismatch starts cleanly and backs up nothing** —
-it looks like an empty backup, not an error.
+If you open a fresh SSH session partway through, re-run `export KUBECONFIG=/etc/rancher/k3s/k3s.yaml`
+before the next `velero` command.
+
+> **Why on the node, not the laptop:** Velero installs *into* the cluster, and `k3-master` already
+> has the cluster, the repo and the credentials nearby. A laptop only adds a kubeconfig copy and a
+> second place for the Velero key to leak. This stage adds Velero alongside the running cluster — it
+> never restarts or stops K3s or your workloads.
+
+### 4.1 — Find the kubelet root
+
+RUN ON: k3-master
+
+Velero's file-system backup reads pod volumes through a hostPath into the *kubelet root*. If it's
+wrong the backup starts cleanly and copies **nothing** — an empty backup that still says `Completed`.
+
+Command:
 
 ```bash
-sudo ls -la /var/lib/kubelet/pods 2>/dev/null | head -3
-sudo k3s kubectl get --raw "/api/v1/nodes/$(hostname)/proxy/configz" 2>/dev/null | head -c 400; echo
+cd ~/poc-k3-backup                        # your repo clone — adjust if your path differs
+sudo ls -la /var/lib/kubelet/pods | head -3
 ```
 
-Write down what you find. You'll compare the node-agent's hostPath against it in 4.3.
+Expected output: the `pods` directory exists and lists a few entries.
 
-### 4.2 — Install Velero `[local]`
-
-Install **Velero CLI v1.18.0** and verify that this machine reaches the production cluster first:
+- Lists directories → the kubelet root is `/var/lib/kubelet`. Go to 4.2.
+- *No such file or directory* → find the real path with the command below and use it wherever 4.2
+  says `KUBELET_ROOT_DIR`:
 
 ```bash
-velero version --client-only       # v1.18.0
-kubectl get nodes                  # k3-master Ready
+sudo k3s kubectl get --raw "/api/v1/nodes/$(hostname)/proxy/configz" | tr ',' '\n' | grep -i rootdir
 ```
 
-The installer pins AWS plugin `v1.14.1`, the compatible plugin series for Velero `v1.18.x`.
+### 4.2 — Install Velero
 
-Now the **Velero** access key from 2.5 comes into play — the `k3-master-velero` pair, which is
-different from the Job 1 key in `backup.env`. It goes into a short-lived file (on whichever machine
-you're running this stage from — laptop or node) that the installer turns into a Kubernetes Secret;
-you shred the file straight after. It is never written to `backup.env` and never committed.
+RUN ON: k3-master
+
+Do 4.2.1 → 4.2.8 in order. Each shows what to expect before the next.
+
+**4.2.1 — Install the Velero CLI v1.18.0.**
+
+```bash
+VELERO_VERSION=v1.18.0
+curl -fsSL -o /tmp/velero.tgz \
+  "https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz"
+tar -xzf /tmp/velero.tgz -C /tmp
+sudo install -m 0755 "/tmp/velero-${VELERO_VERSION}-linux-amd64/velero" /usr/local/bin/velero
+velero version --client-only
+```
+
+Expected: `Version: v1.18.0`. Pass → 4.2.2. Fail → stop (check the URL; this assumes amd64).
+
+**4.2.2 — Point Velero and kubectl at the cluster.**
+
+```bash
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+sudo -E velero version --client-only      # v1.18.0
+sudo k3s kubectl get nodes                # k3-master Ready
+```
+
+Expected: the node is `Ready`. Pass → 4.2.3. Fail → stop; fix K3s health first.
+
+**4.2.3 — Confirm the install script is present.**
+
+```bash
+pwd                                       # /home/<user>/poc-k3-backup
+ls -l ./scripts/velero/install-velero.sh
+```
+
+Expected: the file is listed. Pass → 4.2.4. Fail → stop; the repo isn't on the server — clone/copy
+it, then come back.
+
+**4.2.4 — Create the Velero credentials file.** Use the **`k3-master-velero`** key from 2.5 — **not**
+the `k3-master-backup-writer` key, and never commit this file.
 
 ```bash
 cat > ./velero-credentials <<'EOF'
 [default]
-aws_access_key_id=<k3-master-velero key from 2.5>
-aws_secret_access_key=<k3-master-velero secret from 2.5>
+aws_access_key_id=PUT_K3-MASTER-VELERO_ACCESS_KEY_HERE
+aws_secret_access_key=PUT_K3-MASTER-VELERO_SECRET_KEY_HERE
 EOF
 chmod 600 ./velero-credentials
-
-export S3_BUCKET="$BUCKET" AWS_REGION="$REGION" CREDS_FILE=./velero-credentials
-export KUBELET_ROOT_DIR=/var/lib/kubelet   # replace with the verified 4.1 value
-./scripts/velero/install-velero.sh
-
-shred -u ./velero-credentials             # the key now lives only as a cluster Secret
-kubectl apply -f scripts/velero/schedule-daily.yaml
-kubectl apply -f scripts/velero/schedule-weekly.yaml
+ls -l ./velero-credentials
 ```
 
-No encryption flags are passed — the bucket's default SSE-S3 encrypts every object on arrival. After
-the install, the Velero key lives **only** as a Secret in the `velero` namespace; confirm it landed
-and nothing kept a plaintext copy:
+Expected: the file shows `-rw-------`. Pass → 4.2.5. Fail → stop; fix permissions first.
+
+**4.2.5 — Set the four install values.** Edit the first two lines to your real Stage 2 values.
 
 ```bash
-kubectl -n velero get secret cloud-credentials     # created by the installer
-ls ./velero-credentials 2>/dev/null && echo "DELETE THIS" || echo "good — laptop copy is gone"
+# EDIT THESE TWO to match Stage 2:
+export S3_BUCKET="k3-master-dr"           # your exact bucket name (step 2.2)
+export AWS_REGION="us-east-1"             # your bucket's region (step 2.1)
+
+# These two are already right for this setup:
+export CREDS_FILE="$PWD/velero-credentials"
+export KUBELET_ROOT_DIR="/var/lib/kubelet"   # use the path you confirmed in 4.1
+
+printf 'S3_BUCKET=%s\nAWS_REGION=%s\nCREDS_FILE=%s\nKUBELET_ROOT_DIR=%s\n' \
+  "$S3_BUCKET" "$AWS_REGION" "$CREDS_FILE" "$KUBELET_ROOT_DIR"
 ```
 
-**Check, and write these three versions down** — a restore has to reproduce them, and `velero
-install` deploys `velero/velero:<CLI version>`, so an unpinned CLI silently decides the server
-version:
+Expected: all four print, none blank, region is **your** region (e.g. `us-east-1`). Pass → 4.2.6.
+Fail → stop; re-set whichever is blank or wrong.
+
+**4.2.6 — Run the installer.**
 
 ```bash
-velero version                    # client and server should both read v1.18.0
-kubectl -n velero get deploy velero \
-  -o jsonpath='{.spec.template.spec.initContainers[*].image}{"\n"}'   # plugin v1.14.1
-kubectl -n velero get schedules   # daily and weekly, both Enabled
+sudo -E ./scripts/velero/install-velero.sh
 ```
 
-Record the CLI, server and plugin versions in [01](01-discovery-baseline.md) alongside the K3s
-version. Restoring into a cluster whose Velero predates the backup's format is a migration, not a
-restore.
+Expected: it finishes without error and prints follow-up commands. Pass → 4.2.7. Fail → stop; read
+the last error line.
 
-### 4.3 — Prove the node-agent actually reads the volumes `[local]`
+> **Why `sudo -E`:** it passes your four exported values and `KUBECONFIG` into the root shell the
+> installer runs in. The script pins Velero server `v1.18.0` and AWS plugin `v1.14.1`, enables the
+> node-agent, and configures filesystem backup for `local-path` volumes. No encryption flags are
+> passed — the bucket's SSE-S3 default encrypts every object.
 
-A green checkmark is not evidence. This is
-[gap 6](05-gaps-and-open-questions.md#6-whether-veleros-node-agent-can-actually-read-our-volumes)
-and the most likely silent failure in the whole design.
+**4.2.7 — Apply both schedules, then delete the credentials file.**
 
 ```bash
-kubectl -n velero get pods                       # node-agent must be Running
-kubectl -n velero get backupstoragelocation      # must be Available
-kubectl -n velero get ds node-agent -o jsonpath='{.spec.template.spec.volumes[*].hostPath.path}{"\n"}'
-
-velero backup create verify-$(date +%s) --wait
-velero backup describe <name> --details
+sudo k3s kubectl apply -f scripts/velero/schedule-daily.yaml
+sudo k3s kubectl apply -f scripts/velero/schedule-weekly.yaml
+shred -u ./velero-credentials
 ```
 
-**Check:** the node-agent's hostPath matches what you found in 4.1, and **all six monitoring PVCs
-appear under "Pod Volume Backups"**. An empty section there is the failure — stop and fix it before
-trusting anything.
+Expected: both schedules `created`; the credentials file is gone. Pass → 4.2.8.
 
-Count the pod volumes in that backup and keep the number; it becomes `MIN_EXPECTED_PVBS` in 5.3:
+> **Why:** daily runs Mon–Sat and weekly runs Sunday; both back up all PVC data via filesystem
+> backup. The key now lives only as a Kubernetes Secret, so nothing plaintext is left on disk.
+
+**4.2.8 — Verify the install.**
 
 ```bash
-kubectl -n velero get podvolumebackups \
-  -l velero.io/backup-name=<name> --no-headers | wc -l      # expect 6
+sudo -E velero version                                    # server v1.18.0
+sudo k3s kubectl -n velero get pods -o wide               # velero + node-agent Running
+sudo k3s kubectl -n velero get backupstoragelocation      # PHASE Available
+sudo k3s kubectl -n velero get schedules                  # daily and weekly Enabled
 ```
 
-Use that count, **not** the raw PVC count: an unmounted claim produces no pod volume, and a volume
-mounted by two pods produces two. The number that matters is what the node-agent actually did.
+Expected: server `v1.18.0`, all pods `Running`, BSL `Available`, both schedules `Enabled`. Pass →
+4.3. Fail → stop; a BSL that isn't `Available` almost always means a wrong bucket/region/key in
+4.2.5. Record the CLI, server and plugin versions in [01](01-discovery-baseline.md).
 
-### 4.4 — Confirm object coverage, including ArgoCD `[local]`
+### 4.3 — Prove the node-agent actually reads the volumes
 
-The backup takes everything by default, so this is verifying there's no surprise rather than
-building an include list. It's also what retires the separate daily `argocd admin export` for good
-(the *ArgoCD recoverability* entry in [ISSUES-TRACKER](ISSUES-TRACKER.md)).
+RUN ON: k3-master
+
+A green checkmark is not evidence — this is
+[gap 6](05-gaps-and-open-questions.md#6-whether-veleros-node-agent-can-actually-read-our-volumes),
+the likeliest silent failure in the design. Run one real backup and confirm the volumes are in it.
+
+Command:
 
 ```bash
-velero backup describe <name> --details | sed -n '/Resource List/,$p' | head -40
-
-# cluster-scoped objects must be in there, not just namespaced ones
-velero backup describe <name> --details | grep -E 'customresourcedefinitions|clusterroles|storageclasses'
-
-# ArgoCD's own state: Applications, AppProjects and its Secrets
-velero backup describe <name> --details | grep -E 'argocd/'
+sudo -E velero backup create verify-$(date +%s) --wait
+sudo -E velero backup get                                 # note the exact NAME just created
+sudo -E velero backup describe <name> --details | sed -n '/Pod Volume Backups/,/^$/p'
+sudo k3s kubectl -n velero get podvolumebackups \
+  -l velero.io/backup-name=<name> --no-headers | wc -l    # expect 6
 ```
 
-**Check:**
+Expected: the backup is `Completed` and **six** pod volumes appear (one per monitoring PVC).
 
-- CRDs, ClusterRoles, ClusterRoleBindings and the StorageClass all appear.
-- The `argocd` namespace contributes Secrets, Applications and AppProjects. Anything hand-made in
-  the UI comes back from Velero and *not* from Git, which is exactly why this has to be confirmed.
-- While you're here, write down **which Git repositories and logins ArgoCD depends on**. Velero
-  restores the Application objects; it cannot restore access to a repo whose deploy key nobody has.
+- Count is 6 → write it down as `MIN_EXPECTED_PVBS` for 5.3. Go to 4.4.
+- "Pod Volume Backups" empty / count 0 → **stop.** The node-agent hostPath doesn't match the kubelet
+  root from 4.1. Fix `KUBELET_ROOT_DIR` and re-run 4.2.6.
 
-### 4.5 — Prove one narrow restore `[local]`
+> **Why 6, not the PVC count:** an unmounted claim produces no pod volume, and a volume mounted by
+> two pods produces two. The number that matters is what the node-agent actually copied.
 
-The ~10-minute flow you will actually use most often, so prove it while nothing is wrong. Full
-procedure: [03 §B](03-restore-runbook.md#b--restoring-one-pvc-or-one-object).
+### 4.4 — Confirm object coverage, including ArgoCD
+
+RUN ON: k3-master
+
+The backup takes everything by default; this just confirms there's no surprise, and it's what lets
+you retire a separate `argocd admin export` (the *ArgoCD recoverability* entry in
+[ISSUES-TRACKER](ISSUES-TRACKER.md)).
+
+Command (reuse the `<name>` from 4.3):
 
 ```bash
-kubectl create namespace restore-probe
-kubectl -n restore-probe create configmap probe --from-literal=k=v
-velero backup create probe-$(date +%s) --include-namespaces restore-probe --wait
-
-kubectl delete namespace restore-probe
-velero restore create --from-backup <probe-backup> --include-namespaces restore-probe --wait
-kubectl -n restore-probe get configmap probe -o jsonpath='{.data.k}{"\n"}'   # v
-
-kubectl delete namespace restore-probe
+sudo -E velero backup describe <name> --details | grep -E 'customresourcedefinitions|clusterroles|storageclasses'
+sudo -E velero backup describe <name> --details | grep -E 'argocd/'
 ```
 
-**Check:** the ConfigMap comes back with its data. Then stop there — **do not** try to prove PVC
-recovery with a scratch namespace. Volume data only returns when Velero creates the pod, so a
-meaningful PVC test requires the controller-aware procedure in
-[03 §B](03-restore-runbook.md#one-pvcs-data) (suspend ArgoCD, delete the owning workload *and* the
-claim) and the real thing is exercised by the restore test in 5.7.
+Expected: CRDs, ClusterRoles and the StorageClass appear, and the `argocd` namespace contributes
+Secrets, Applications and AppProjects. Pass → 4.5. Fail → stop; missing cluster-scoped objects mean
+the backup isn't cluster-wide.
 
-### 4.6 — A week later: confirm backups expire `[local]`
+> **Why:** anything created by hand in the ArgoCD UI comes back from Velero, not from Git. Also note
+> **which Git repos and logins ArgoCD depends on** — Velero restores the Application objects, not
+> access to a repo whose deploy key nobody has.
 
-Put this in your calendar for eight days out. It is the only proof that Velero's delete permission
-on `velero/*` works — and if it doesn't, retention is fiction and the bucket grows forever.
+### 4.5 — Prove one narrow restore
+
+RUN ON: k3-master
+
+The ~10-minute flow you'll use most. Full procedure:
+[03 §B](03-restore-runbook.md#b--restoring-one-pvc-or-one-object).
+
+Command:
 
 ```bash
-velero backup get                       # nothing older than 7 days in the daily tier
-velero backup get -l velero.io/schedule-name=weekly
-aws s3 ls "s3://$BUCKET/velero/backups/" | wc -l
+sudo k3s kubectl create namespace restore-probe
+sudo k3s kubectl -n restore-probe create configmap probe --from-literal=k=v
+sudo -E velero backup create probe-$(date +%s) --include-namespaces restore-probe --wait
+sudo -E velero backup get                                 # note the probe backup NAME
+
+sudo k3s kubectl delete namespace restore-probe
+sudo -E velero restore create --from-backup <probe-backup> --include-namespaces restore-probe --wait
+sudo k3s kubectl -n restore-probe get configmap probe -o jsonpath='{.data.k}{"\n"}'   # v
+
+sudo k3s kubectl delete namespace restore-probe
 ```
 
-**Check:** daily-tier backups older than 168 h are gone, Sunday ones survive to 720 h, and the
-object count is flat rather than climbing. If nothing ever expires, re-read the Velero policy in
-2.5 before "fixing" the schedules.
+Expected: the ConfigMap comes back with value `v`. Pass → 4.6. Fail → stop; a restore that can't
+rebuild a ConfigMap won't rebuild anything.
+
+> **Why stop at a ConfigMap:** PVC data only returns when Velero recreates the pod, so a real volume
+> test needs the controller-aware procedure ([03 §B](03-restore-runbook.md#one-pvcs-data)) and is
+> exercised by the restore test in 5.7 — **don't** delete a production PVC here.
+
+### 4.6 — A week later: confirm backups expire
+
+RUN ON: k3-master (set a calendar reminder for 8 days out)
+
+The only proof that Velero's delete permission works. If it doesn't, retention is fiction and the
+bucket grows forever.
+
+Command:
+
+```bash
+sudo -E velero backup get                                 # nothing older than 7 days in the daily tier
+sudo -E velero backup get -l velero.io/schedule-name=weekly
+```
+
+Expected: daily-tier backups older than 168 h are gone, Sunday ones survive to 720 h, and the list
+is stable rather than growing every day. Pass → Stage 5. Fail → re-read the Velero policy in 2.5
+before touching the schedules.
+
+> **Why not `aws s3 ls` here:** the only AWS key on `k3-master` is Job 1's, scoped to `k3s/` — it
+> can't list `velero/`. `velero backup get` reads the object store through Velero's own credential,
+> which is the right lens anyway.
 
 ---
 

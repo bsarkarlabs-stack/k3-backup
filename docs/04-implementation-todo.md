@@ -91,33 +91,33 @@ this plan covers either.
 Commands: [07 stage 4](07-setup.md#stage-4--deploy-job-2-velero), steps 4.1–4.6.
 
 - [ ] Find K3s's kubelet root **before** trusting anything
-      ([07 step 4.1](07-setup.md#41--find-the-kubelet-root-node))
+      ([07 step 4.1](07-setup.md#41--find-the-kubelet-root))
 - [ ] Install pinned Velero CLI `v1.18.0`; run
       [`scripts/velero/install-velero.sh`](../scripts/velero/install-velero.sh) with AWS plugin
       `v1.14.1` and the verified `KUBELET_ROOT_DIR` — Velero +
       plugin, node-agent on, `prefix=velero`, `--use-volume-snapshots=false`,
       `--default-volumes-to-fs-backup`
-      ([07 step 4.2](07-setup.md#42--install-velero-local))
+      ([07 step 4.2](07-setup.md#42--install-velero))
 - [ ] Apply [`schedule-daily.yaml`](../scripts/velero/schedule-daily.yaml) and
       [`schedule-weekly.yaml`](../scripts/velero/schedule-weekly.yaml)
 - [ ] **Verify the node-agent actually reads the volumes.** `velero backup describe <name> --details`
       must list all six monitoring PVCs under *Pod Volume Backups*. An empty list means the hostPath
       doesn't match the kubelet root — it fails silently and looks like success
-      ([07 step 4.3](07-setup.md#43--prove-the-node-agent-actually-reads-the-volumes-local))
+      ([07 step 4.3](07-setup.md#43--prove-the-node-agent-actually-reads-the-volumes))
 - [ ] Confirm cluster-scoped resources are in the backup (CRDs, ClusterRoles, StorageClass)
-      ([07 step 4.4](07-setup.md#44--confirm-object-coverage-including-argocd-local))
+      ([07 step 4.4](07-setup.md#44--confirm-object-coverage-including-argocd))
 - [ ] Confirm the `argocd` namespace backup contains its Secrets and Applications — this is what
       retires the separate ArgoCD export ([#20](../../../issues/20), [#1](../../../issues/1))
 - [ ] Record the volume count from that verified backup — it becomes `MIN_EXPECTED_PVBS` in phase 4
-      ([07 step 4.3](07-setup.md#43--prove-the-node-agent-actually-reads-the-volumes-local))
+      ([07 step 4.3](07-setup.md#43--prove-the-node-agent-actually-reads-the-volumes))
 - [ ] One **object** restore into a scratch namespace
-      ([07 step 4.5](07-setup.md#45--prove-one-narrow-restore-local)). Do **not** delete a
+      ([07 step 4.5](07-setup.md#45--prove-one-narrow-restore)). Do **not** delete a
       production PVC here — volume copy-back is proven in the restore test (phase 5 / §A step 9)
 - [ ] After a week, confirm old backups actually expire — proves the `velero/` delete permission is
-      right ([07 step 4.6](07-setup.md#46--a-week-later-confirm-backups-expire-local))
+      right ([07 step 4.6](07-setup.md#46--a-week-later-confirm-backups-expire))
 - [ ] Pin the Velero CLI version to match `install-velero.sh` and record the CLI, server and plugin
       versions — `velero install` deploys `velero/velero:<CLI version>`, so an unpinned CLI silently
-      decides the server version ([07 step 4.2](07-setup.md#42--install-velero-local))
+      decides the server version ([07 step 4.2](07-setup.md#42--install-velero))
 
 ---
 
