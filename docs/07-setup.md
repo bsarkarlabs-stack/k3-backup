@@ -736,8 +736,12 @@ sudo install -m 0750 -o root -g root /tmp/k3s-server-backup.sh /usr/local/sbin/k
 sudo install -m 0644 -o root -g root /tmp/k3s-backup.service /tmp/k3s-backup.timer /etc/systemd/system/
 sudo install -d -m 0700 -o root -g root /var/backups/k3s
 sudo systemctl daemon-reload
-bash -n /usr/local/sbin/k3s-server-backup.sh && echo "syntax OK"
+sudo bash -n /usr/local/sbin/k3s-server-backup.sh && echo "syntax OK"
 ```
+
+> `sudo` is required for the syntax check: the script is installed `0750 root:root`, so a normal user
+> can't read it. The same applies to inspecting `/var/backups/k3s` later — it's `0700 root:root`, so
+> every `ls`/`tar`/`cat` under it needs `sudo` too.
 
 > Copy it **from the repo**, don't paste it into an editor on the server. The repo is the one true
 > copy.
@@ -765,8 +769,15 @@ Save that output. Steps 3.5 and 3.6 compare against it.
 
 ```bash
 sudo DRY_RUN=1 /usr/local/sbin/k3s-server-backup.sh
-sudo ls -lah /var/backups/k3s/*/
+sudo ls -lah /var/backups/k3s/                    # the dated run directory the script just created
+sudo sh -c 'ls -lah /var/backups/k3s/*/'          # the files inside it
 ```
+
+> **Why `sudo sh -c '...'` for the wildcard.** `/var/backups/k3s` is `0700 root:root`. In
+> `sudo ls /var/backups/k3s/*/` your **own** shell expands `*` *before* `sudo` runs, and since your
+> user can't read the directory the glob matches nothing and the command fails. Wrapping it in
+> `sudo sh -c '...'` makes **root's** shell do the expansion. The plain `sudo ls -lah
+> /var/backups/k3s/` works without the wrapper because it has no wildcard.
 
 **Check:** the script should print `snapshot ok (read-only), integrity_check=ok`, then
 `manifest: k3s=v1.34.5+k3s1 …`, then an archive size around 20 MB. In the staging folder you should
@@ -775,9 +786,41 @@ see four things — the `.tar.gz`, its `.sha256`, `MANIFEST.json`, and `COMPLETE
 Look inside without extracting anything:
 
 ```bash
-sudo tar -tzf /var/backups/k3s/*/k3s-*.tar.gz | head -30
-sudo python3 -m json.tool /var/backups/k3s/*/MANIFEST.json
+sudo sh -c 'tar -tzf /var/backups/k3s/*/k3s-*.tar.gz' | head -30
+sudo sh -c 'python3 -m json.tool /var/backups/k3s/*/MANIFEST.json'
 ```
+
+> Same wildcard rule as above — the `/var/backups/k3s/*/` path is expanded by root inside
+> `sudo sh -c '...'`. `head` stays outside the quotes; it needs no privilege.
+
+**Validate the archive actually contains a complete restore set.** The listing above is truncated to
+30 lines, so eyeballing it can miss a gap. This confirms every part a restore depends on is really
+inside the archive — the datastore, all four halves of the cluster identity, the config and the
+systemd unit — and prints `MISSING` for anything absent:
+
+```bash
+sudo sh -c '
+  A=$(ls /var/backups/k3s/*/k3s-*.tar.gz)
+  L=$(tar -tzf "$A")
+  for p in \
+    MANIFEST.json \
+    state.db \
+    fs-root/var/lib/rancher/k3s/server/token \
+    fs-root/var/lib/rancher/k3s/server/tls/ \
+    fs-root/var/lib/rancher/k3s/server/cred/ \
+    fs-root/var/lib/rancher/k3s/server/manifests/ \
+    fs-root/etc/rancher/k3s/ \
+    fs-root/etc/systemd/system/k3s.service \
+    host-facts/README.txt ; do
+    printf "%s\n" "$L" | grep -q "^\./$p" && echo "present : $p" || echo "MISSING : $p"
+  done
+'
+```
+
+**Check:** every line reads `present`. A single `MISSING` — especially `state.db`, `token`, `tls/`
+or `cred/` — means the archive can't rebuild the cluster on its own; stop and fix the script before
+trusting the backup. (`token`, `tls/`, `cred/` and `state.db` are four halves of the same identity;
+restoring only some of them produces a cluster that won't trust its own data.)
 
 **Check the manifest**, because it's the file a restore reads first:
 
@@ -798,7 +841,7 @@ sudo k3s kubectl get nodes
 zero downtime.
 
 ```bash
-sudo rm -rf /var/backups/k3s/*/
+sudo sh -c 'rm -rf /var/backups/k3s/*/'   # wildcard, so run it inside sudo sh -c (see 3.5)
 ```
 
 ### 3.6 — First real run `[node]`

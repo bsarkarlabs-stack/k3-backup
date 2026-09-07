@@ -52,7 +52,7 @@ STAGE_ROOT=${STAGE_ROOT:-/var/backups/k3s}
 
 FAILS=0; WARNS=0; PASSES=0
 declare -a REMEDIES=()
-
+8
 c_red=''; c_yel=''; c_grn=''; c_dim=''; c_bold=''; c_off=''
 if [ -t 1 ]; then
   c_red=$'\033[31m'; c_yel=$'\033[33m'; c_grn=$'\033[32m'
