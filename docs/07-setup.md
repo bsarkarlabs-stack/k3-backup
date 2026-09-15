@@ -1031,7 +1031,39 @@ RUN ON: k3-master
 Velero's file-system backup reads pod volumes through a hostPath into the *kubelet root*. If it's
 wrong the backup starts cleanly and copies **nothing** — an empty backup that still says `Completed`.
 
-Command:
+Confirm three things first: the kubeconfig exists, the node API answers, and the default pods
+directory is present.
+
+**Kubeconfig is on disk.** Do **not** `cat` this file into chat, tickets, or the `script` transcript
+from the start of this doc — it is the cluster admin key.
+
+```bash
+sudo test -r /etc/rancher/k3s/k3s.yaml && echo "OK: kubeconfig exists"
+sudo grep -E '^\s+server:' /etc/rancher/k3s/k3s.yaml
+```
+
+Expected: `OK: kubeconfig exists` and `server: https://127.0.0.1:6443`. Pass → the next command.
+Fail → stop; K3s is not installed the way later `KUBECONFIG=` lines assume.
+
+**The node config API answers.** This is the same endpoint 4.1 uses if the kubelet root is not the
+default; a JSON blob means `k3s kubectl` can talk to the local API:
+
+```bash
+sudo k3s kubectl get --raw "/api/v1/nodes/$(hostname)/proxy/configz" 2>/dev/null | head -c 500; echo
+```
+
+Expected: a JSON object (it often starts with `cloudcontrollermanager.config.k8s.io`). Pass → the
+pods check. Empty output or an error → stop; fix K3s/`kubectl` before installing Velero.
+
+**The default kubelet pods dir exists:**
+
+```bash
+sudo test -d /var/lib/kubelet/pods \
+  && echo "OK: /var/lib/kubelet/pods exists" \
+  || echo "NOT FOUND"
+```
+
+Expected: `OK: /var/lib/kubelet/pods exists`. Then list it:
 
 ```bash
 cd ~/poc-k3-backup                        # your repo clone — adjust if your path differs
@@ -1041,8 +1073,8 @@ sudo ls -la /var/lib/kubelet/pods | head -3
 Expected output: the `pods` directory exists and lists a few entries.
 
 - Lists directories → the kubelet root is `/var/lib/kubelet`. Go to 4.2.
-- *No such file or directory* → find the real path with the command below and use it wherever 4.2
-  says `KUBELET_ROOT_DIR`:
+- `NOT FOUND` or *No such file or directory* → find the real path with the command below and use it
+  wherever 4.2 says `KUBELET_ROOT_DIR`:
 
 ```bash
 sudo k3s kubectl get --raw "/api/v1/nodes/$(hostname)/proxy/configz" | tr ',' '\n' | grep -i rootdir
@@ -1079,16 +1111,31 @@ Expected: the node is `Ready`. Pass → 4.2.3. Fail → stop; fix K3s health fir
 
 **4.2.3 — Confirm the install script is present.**
 
+Stay at the **clone root**. `~` and `~/poc-k3-backup/scripts` both fail later steps: `$PWD/velero-credentials`
+will be wrong, and `./scripts/...` will not exist.
+
 ```bash
-pwd                                       # /home/<user>/poc-k3-backup
-ls -l ./scripts/velero/install-velero.sh
+cd ~/poc-k3-backup
+pwd
+# must print /home/ubuntu/poc-k3-backup
+# not /home/ubuntu
+# not /home/ubuntu/poc-k3-backup/scripts
+
+# This repo keeps Velero files under scripts/velero/. An older clone may be flat under scripts/.
+ls -l ./scripts/velero/install-velero.sh ./scripts/install-velero.sh
 ```
 
-Expected: the file is listed. Pass → 4.2.4. Fail → stop; the repo isn't on the server — clone/copy
-it, then come back.
+Expected: **at least one** of those two files is listed. Pass → 4.2.4. Fail → stop; the repo isn't
+on the server — clone/copy it, then come back.
+
+On this node the file is `./scripts/install-velero.sh`. Use that path in 4.2.6.
 
 **4.2.4 — Create the Velero credentials file.** Use the **`k3-master-velero`** key from 2.5 — **not**
 the `k3-master-backup-writer` key, and never commit this file.
+
+Run this **after** the `cd ~/poc-k3-backup` in 4.2.3, so the file lands in the clone root. If you
+already created it in `~` (`/home/ubuntu/velero-credentials`), skip the `cat` and either move it
+in or point `CREDS_FILE` at that absolute path in 4.2.5.
 
 ```bash
 cat > ./velero-credentials <<'EOF'
@@ -1103,27 +1150,38 @@ ls -l ./velero-credentials
 Expected: the file shows `-rw-------`. Pass → 4.2.5. Fail → stop; fix permissions first.
 
 **4.2.5 — Set the four install values.** Edit the first two lines to your real Stage 2 values.
+`cd ~/poc-k3-backup` first if this is a new shell.
 
 ```bash
+cd ~/poc-k3-backup
+
 # EDIT THESE TWO to match Stage 2:
 export S3_BUCKET="k3-master-dr"           # your exact bucket name (step 2.2)
 export AWS_REGION="us-east-1"             # your bucket's region (step 2.1)
 
-# These two are already right for this setup:
+# KUBELET_ROOT_DIR is already right (confirmed in 4.1).
+# CREDS_FILE: use $PWD/... if the file is in the clone root; use the home path if it is still in ~.
+export KUBELET_ROOT_DIR="/var/lib/kubelet"
 export CREDS_FILE="$PWD/velero-credentials"
-export KUBELET_ROOT_DIR="/var/lib/kubelet"   # use the path you confirmed in 4.1
+# this node's copy is in home — uncomment if ls below cannot find $PWD/velero-credentials:
+# export CREDS_FILE="/home/ubuntu/velero-credentials"
 
 printf 'S3_BUCKET=%s\nAWS_REGION=%s\nCREDS_FILE=%s\nKUBELET_ROOT_DIR=%s\n' \
   "$S3_BUCKET" "$AWS_REGION" "$CREDS_FILE" "$KUBELET_ROOT_DIR"
+ls -l "$CREDS_FILE"
 ```
 
-Expected: all four print, none blank, region is **your** region (e.g. `us-east-1`). Pass → 4.2.6.
-Fail → stop; re-set whichever is blank or wrong.
+Expected: all four print, none blank, region is **your** region (e.g. `us-east-1`), and `ls` shows
+`-rw-------`. Pass → 4.2.6. Fail → stop; re-set whichever is blank or wrong.
 
-**4.2.6 — Run the installer.**
+**4.2.6 — Run the installer.** Still from `~/poc-k3-backup`:
 
 ```bash
-sudo -E ./scripts/velero/install-velero.sh
+# older / this-node clone (flat scripts/):
+sudo -E ./scripts/install-velero.sh
+
+# current GitHub layout instead:
+# sudo -E ./scripts/velero/install-velero.sh
 ```
 
 Expected: it finishes without error and prints follow-up commands. Pass → 4.2.7. Fail → stop; read
@@ -1136,10 +1194,17 @@ the last error line.
 
 **4.2.7 — Apply both schedules, then delete the credentials file.**
 
+Still from `~/poc-k3-backup`. This node's clone listed no `schedule-*.yaml` under `scripts/` —
+if `ls` below fails, copy `scripts/velero/schedule-daily.yaml` and `schedule-weekly.yaml` from the
+current repo onto the node before applying.
+
 ```bash
+ls -l scripts/velero/schedule-daily.yaml scripts/velero/schedule-weekly.yaml
 sudo k3s kubectl apply -f scripts/velero/schedule-daily.yaml
 sudo k3s kubectl apply -f scripts/velero/schedule-weekly.yaml
 shred -u ./velero-credentials
+# if the key was created in home instead:
+# shred -u /home/ubuntu/velero-credentials
 ```
 
 Expected: both schedules `created`; the credentials file is gone. Pass → 4.2.8.
