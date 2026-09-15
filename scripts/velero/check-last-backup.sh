@@ -44,7 +44,9 @@ done
 
 export KUBECONFIG="$KUBECONFIG_PATH"
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+trap 'rm -rf "$tmp"
+
+' EXIT
 
 k3s kubectl -n velero get backups.velero.io -o json > "$tmp/backups.json"
 
