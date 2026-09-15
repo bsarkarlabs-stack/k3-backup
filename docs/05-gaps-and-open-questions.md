@@ -104,7 +104,7 @@ confirmed it isn't.
 **To close, and it takes five minutes** —
 [07 step 2.7](07-setup.md#27--write-down-who-can-restore-local):
 
-- Name **at least two people** who can log into AWS and read `s3://k3-master-dr`.
+- Name **at least two people** who can log into AWS and read `s3://k3-master-dr-sep-07`.
 - Write the **bucket name and region** somewhere that survives losing AWS access to that account —
   this repo counts, and it already says both.
 - Name the owner and rotation interval for both workload keys (Job 1 and Velero).

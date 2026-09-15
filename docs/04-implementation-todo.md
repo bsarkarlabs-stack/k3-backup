@@ -93,10 +93,12 @@ Commands: [07 stage 4](07-setup.md#stage-4--deploy-job-2-velero), steps 4.1–4.
 - [ ] Find K3s's kubelet root **before** trusting anything
       ([07 step 4.1](07-setup.md#41--find-the-kubelet-root))
 - [ ] Install pinned Velero CLI `v1.18.0`; run
-      [`scripts/velero/install-velero.sh`](../scripts/velero/install-velero.sh) with AWS plugin
-      `v1.14.1` and the verified `KUBELET_ROOT_DIR` — Velero +
+      [`scripts/velero/install-velero.sh`](../scripts/velero/install-velero.sh) (this GitHub
+      layout) with AWS plugin `v1.14.1` and the verified `KUBELET_ROOT_DIR` — Velero +
       plugin, node-agent on, `prefix=velero`, `--use-volume-snapshots=false`,
-      `--default-volumes-to-fs-backup`
+      `--default-volumes-to-fs-backup`. The live node clone is older and keeps the same file at
+      `~/poc-k3-backup/scripts/install-velero.sh` — [07 step 4.2.0](07-setup.md#42--install-velero)
+      picks whichever exists. Bucket `k3-master-dr-sep-07`, region `us-east-1`.
       ([07 step 4.2](07-setup.md#42--install-velero))
 - [ ] Apply [`schedule-daily.yaml`](../scripts/velero/schedule-daily.yaml) and
       [`schedule-weekly.yaml`](../scripts/velero/schedule-weekly.yaml)

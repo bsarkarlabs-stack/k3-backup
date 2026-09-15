@@ -14,7 +14,7 @@ Built on the facts confirmed in [01 — Discovery Baseline](01-discovery-baselin
 | Runs when | 02:15 UTC daily | 03:30 UTC: daily Monday–Saturday, weekly Sunday |
 | Backs up | The SQLite datastore, the cluster's identity, and the config K3s starts with | Every Kubernetes object in every namespace, plus all PVC data |
 | Restores | **This server**, rebuilt from bare metal | Objects and PVC data into a source-compatible cluster; cross-version recovery is a tested migration, not guaranteed portability |
-| Lands in | `s3://k3-master-dr/k3s/` | `s3://k3-master-dr/velero/` |
+| Lands in | `s3://k3-master-dr-sep-07/k3s/` | `s3://k3-master-dr-sep-07/velero/` |
 | Produces | Archive + checksum + manifest + last-written completion marker | A Kopia repository Velero manages itself |
 
 They overlap a little, and that's deliberate — the overlap is the fallback, not waste. Job 1 alone
@@ -77,7 +77,7 @@ Writing this down is what stops the design drifting into either paranoia or fals
 One bucket. Three prefixes that we write, one that Velero owns.
 
 ```text
-s3://k3-master-dr/
+s3://k3-master-dr-sep-07/
 ├── k3s/
 │   ├── daily/YYYY-MM-DDTHHMMSSZ/     one unique committed run
 │   └── weekly/YYYY-MM-DDTHHMMSSZ/    Sunday copy
@@ -240,7 +240,9 @@ requirements, install method — belongs in Git or your IaC, not in a nightly ba
 
 ## 5. Job 2 — Velero
 
-Install: [`scripts/velero/install-velero.sh`](../scripts/velero/install-velero.sh).
+Install: [`scripts/velero/install-velero.sh`](../scripts/velero/install-velero.sh) in this repo
+(the live node clone may have the same script at `scripts/install-velero.sh`).
+Bucket `k3-master-dr-sep-07`, region `us-east-1`.
 Schedules: [`schedule-daily.yaml`](../scripts/velero/schedule-daily.yaml),
 [`schedule-weekly.yaml`](../scripts/velero/schedule-weekly.yaml).
 

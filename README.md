@@ -42,7 +42,7 @@ Two backup jobs, plus one host-side Velero verification timer. One bucket.
 | Backs up | SQLite datastore, cluster identity (`tls/` `cred/` `token` `manifests/`), K3s config and start flags, a plain-text host fact sheet | Every Kubernetes object in every namespace, **plus all PVC data** |
 | Produces | One `.tar.gz` + checksum + manifest + last-written completion marker | A Kopia repository Velero manages itself |
 | Restores | This server, rebuilt from bare metal | Objects/PVC data into a source-compatible cluster |
-| Lands in | `s3://k3-master-dr/k3s/` | `s3://k3-master-dr/velero/` |
+| Lands in | `s3://k3-master-dr-sep-07/k3s/` | `s3://k3-master-dr-sep-07/velero/` |
 | Retention | S3 lifecycle: 7 daily + 4 weekly | Velero TTL: 6 weekday (168 h) + 4 Sunday (720 h) |
 
 The bucket is private, versioned, and encrypted with **SSE-S3**. Job 1 and Velero use separate

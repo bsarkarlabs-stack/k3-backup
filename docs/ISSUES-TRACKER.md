@@ -181,7 +181,7 @@ Commands: [07 step 2.7](07-setup.md#27--write-down-who-can-restore-local).
 
 **Answer / Output:**
 ```
-People who can read s3://k3-master-dr:
+People who can read s3://k3-master-dr-sep-07 (us-east-1):
 Bucket name + region recorded outside AWS:   yes / no
 Recovery kit (this repo) cloned off k3-master: yes / no
 Who rotates the Job 1 and Velero keys, and how often:

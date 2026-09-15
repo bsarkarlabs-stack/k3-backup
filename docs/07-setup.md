@@ -5,6 +5,18 @@ meant to be run **one at a time**, checking the "check" that follows before movi
 
 **Target server:** `k3-master` (`45.90.98.51`) — live production, **zero tolerance for downtime**.
 
+**This deployment — copy these values everywhere.** `k3-master-dr` was taken, so Stage 2 used a
+suffix. Do not paste the old example name or Mumbai region.
+
+| | |
+|---|---|
+| Bucket | `k3-master-dr-sep-07` |
+| Region | `us-east-1` |
+| Clone on the node | `~/poc-k3-backup` |
+| Velero credentials on the node | `~/poc-k3-backup/scripts/velero-credentials` (shred after 4.2.7; do not commit) |
+| Installer on this node | `~/poc-k3-backup/scripts/install-velero.sh` |
+| Installer in this GitHub repo | `scripts/velero/install-velero.sh` |
+
 Five stages, in order:
 
 | Stage | What it does | Steps | Where | Downtime risk |
@@ -56,7 +68,7 @@ required of you that isn't a step below.
 | [3.7](#37--verify-the-archive-off-the-server-local) | Download it and verify the integrity chain | `[local]` | Practises the restore-time check while nothing is on fire |
 | [3.8](#38--turn-the-schedule-on-node) | Enable the timer | `[node]` | — |
 | [4.1](#41--find-the-kubelet-root) | Find K3s's kubelet root | `[node]` | A mismatch backs up **nothing** and still says `Completed` |
-| [4.2](#42--install-velero) | Install Velero on the node and apply both schedules; record the versions | `[node]` | — |
+| [4.2](#42--install-velero) | Install Velero (start every session with 4.2.0, then 4.2.1–4.2.8) | `[node]` | — |
 | [4.3](#43--prove-the-node-agent-actually-reads-the-volumes) | Prove all six PVCs appear as Pod Volume Backups | `[node]` | [gap 6](05-gaps-and-open-questions.md#6-whether-veleros-node-agent-can-actually-read-our-volumes) — the likeliest silent failure |
 | [4.4](#44--confirm-object-coverage-including-argocd) | Confirm cluster-scoped objects and the `argocd` namespace | `[node]` | What retires a separate ArgoCD export |
 | [4.5](#45--prove-one-narrow-restore) | Restore one object into a scratch namespace | `[node]` | The 10-minute flow you'll actually use most |
@@ -118,8 +130,8 @@ Then set the variables every later `[local]` step relies on:
 
 ```bash
 export AWS_PROFILE=k3-backup-admin        # the profile you just selected
-export REGION=ap-south-1                   # Mumbai. Any region works — see stage 2.1
-export BUCKET=k3-master-dr                 # globally unique; add a suffix if taken
+export REGION=us-east-1                    # this deployment (N. Virginia). See stage 2.1
+export BUCKET=k3-master-dr-sep-07          # live bucket; k3-master-dr was taken
 export ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 echo "$REGION / $BUCKET / $ACCOUNT_ID"
 ```
@@ -332,7 +344,7 @@ Git. There are **four** places things live, and each one holds different things.
               +---------------+----------------+
               |                                |
           S3 bucket                          IAM
-        k3-master-dr-xxxx        +------------+------------+
+     k3-master-dr-sep-07         +------------+------------+
                                  |                         |
                        k3-master-backup-writer     k3-master-velero
                           (Job 1 key)                 (Velero key)
@@ -393,8 +405,8 @@ irrelevant; pick on cost and on where the team and any compliance requirements a
 
 | Region | Code | Good when |
 |--------|------|-----------|
-| Mumbai | `ap-south-1` | Team is in India. **Our default** |
-| N. Virginia | `us-east-1` | Cheapest. One quirk, noted in 2.2 |
+| Mumbai | `ap-south-1` | Team is in India. Design default; **this deployment did not use it** |
+| N. Virginia | `us-east-1` | Cheapest. **This deployment.** One quirk, noted in 2.2 |
 | Frankfurt | `eu-central-1` | Closest to the Datalix server; keeps data in the EU |
 
 > **Why off-site at all:** this server is on-premise-style with no hosting-provider snapshot. A
@@ -417,8 +429,9 @@ fi
 > Written as an `if` on purpose: `us-east-1` is the one region that **rejects**
 > `--create-bucket-configuration`, while every other region **requires** it.
 
-> Bucket names are globally unique. On `BucketAlreadyExists`, use `k3-master-dr-<yourorg>` and
-> update `$BUCKET` — every later command reads that variable.
+> Bucket names are globally unique. `k3-master-dr` was taken, so this deployment uses
+> `k3-master-dr-sep-07`. If you ever create another bucket, add a suffix and update `$BUCKET` —
+> every later command reads that variable.
 
 ### 2.3 — Lock it down, before anything is uploaded
 
@@ -667,7 +680,7 @@ aws sts get-caller-identity
 Record all four of these under *Who can actually perform a restore* in
 [ISSUES-TRACKER](ISSUES-TRACKER.md) — the answers, not just the question:
 
-1. **At least two named people** who can log into AWS and read `s3://k3-master-dr`. One is not a
+1. **At least two named people** who can log into AWS and read `s3://k3-master-dr-sep-07`. One is not a
    plan; it's a single point of failure with a name.
 2. **The bucket name and region, somewhere that survives losing access to this AWS account.** This
    repo counts and already states both — confirm that's still true rather than assuming it.
@@ -699,8 +712,8 @@ sudo nano /etc/k3s-backup/backup.env
 ```
 
 ```ini
-S3_BUCKET=k3-master-dr
-AWS_REGION=<your-region>
+S3_BUCKET=k3-master-dr-sep-07
+AWS_REGION=us-east-1
 AWS_ACCESS_KEY_ID=<k3-master-backup-writer key from 2.5>
 AWS_SECRET_ACCESS_KEY=<k3-master-backup-writer secret from 2.5>
 # Job 1's external dead-man signal. Velero uses a separate URL. See 02 §7.
@@ -1013,11 +1026,11 @@ deleted Secret, and `local-path` destroys a volume's files the instant its PVC g
 step below is written the same way — *what it does*, the *command*, and the *expected output*, with
 "go on / stop" at the end. Two fixed conventions so nothing branches:
 
-- Run Velero as **`sudo -E velero …`** — it reads the kubeconfig you export once in 4.2.
+- Run Velero as **`sudo -E velero …`** — it reads `KUBECONFIG` from the new-shell block in 4.2.0.
 - Run Kubernetes commands as **`sudo k3s kubectl …`** — K3s's built-in client, nothing to install.
 
-If you open a fresh SSH session partway through, re-run `export KUBECONFIG=/etc/rancher/k3s/k3s.yaml`
-before the next `velero` command.
+If the SSH session drops, or you open a new terminal, **paste 4.2.0 again** before the next
+command. `export` values do not survive a new shell.
 
 > **Why on the node, not the laptop:** Velero installs *into* the cluster, and `k3-master` already
 > has the cluster, the repo and the credentials nearby. A laptop only adds a kubeconfig copy and a
@@ -1066,7 +1079,6 @@ sudo test -d /var/lib/kubelet/pods \
 Expected: `OK: /var/lib/kubelet/pods exists`. Then list it:
 
 ```bash
-cd ~/poc-k3-backup                        # your repo clone — adjust if your path differs
 sudo ls -la /var/lib/kubelet/pods | head -3
 ```
 
@@ -1084,9 +1096,58 @@ sudo k3s kubectl get --raw "/api/v1/nodes/$(hostname)/proxy/configz" | tr ',' '\
 
 RUN ON: k3-master
 
-Do 4.2.1 → 4.2.8 in order. Each shows what to expect before the next.
+Do **4.2.0 every time this terminal is new**. Then 4.2.1 → 4.2.8. Paths are absolute on purpose —
+do not `cd` into `scripts/` to run commands. Stay at `~/poc-k3-backup`.
 
-**4.2.1 — Install the Velero CLI v1.18.0.**
+**4.2.0 — New shell (paste this whole block first).**
+
+Do this: after SSH, after `exit`, after a disconnect, before 4.2.6 / 4.2.7 / 4.2.8. Bucket and
+region below are **this deployment** (`k3-master-dr-sep-07` / `us-east-1`).
+
+```bash
+cd ~/poc-k3-backup
+
+export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+export KUBELET_ROOT_DIR=/var/lib/kubelet
+export S3_BUCKET=k3-master-dr-sep-07
+export AWS_REGION=us-east-1
+export CREDS_FILE="$HOME/poc-k3-backup/scripts/velero-credentials"
+
+if [ -f "$PWD/scripts/velero/install-velero.sh" ]; then
+  export VELERO_INSTALLER="$PWD/scripts/velero/install-velero.sh"
+  export VELERO_SCRIPTS="$PWD/scripts/velero"
+elif [ -f "$PWD/scripts/install-velero.sh" ]; then
+  export VELERO_INSTALLER="$PWD/scripts/install-velero.sh"
+  export VELERO_SCRIPTS="$PWD/scripts"
+else
+  echo "STOP: install-velero.sh not found under $PWD/scripts"
+fi
+
+echo "PWD=$PWD"
+echo "S3_BUCKET=$S3_BUCKET"
+echo "AWS_REGION=$AWS_REGION"
+echo "CREDS_FILE=$CREDS_FILE"
+echo "KUBELET_ROOT_DIR=$KUBELET_ROOT_DIR"
+echo "VELERO_INSTALLER=$VELERO_INSTALLER"
+echo "VELERO_SCRIPTS=$VELERO_SCRIPTS"
+
+[ "$PWD" = "$HOME/poc-k3-backup" ] && echo "OK: clone root" || echo "STOP: not in ~/poc-k3-backup"
+[ -r "$CREDS_FILE" ] && echo "OK: credentials" || echo "STOP: create $CREDS_FILE in 4.2.4"
+[ -f "$VELERO_INSTALLER" ] && echo "OK: installer" || echo "STOP: clone missing install-velero.sh"
+sudo k3s kubectl get nodes
+```
+
+Expected:
+
+- `PWD=/home/ubuntu/poc-k3-backup`
+- `S3_BUCKET=k3-master-dr-sep-07`
+- `AWS_REGION=us-east-1`
+- `OK: clone root`, `OK: installer`, node `Ready`
+- `OK: credentials` after 4.2.4 exists; `STOP: create …` is fine **only** before 4.2.4
+
+Pass → 4.2.1 (first time) or 4.2.6 (if CLI + credentials already exist). Fail → stop.
+
+**4.2.1 — Install the Velero CLI v1.18.0.** Once per node.
 
 ```bash
 VELERO_VERSION=v1.18.0
@@ -1099,120 +1160,91 @@ velero version --client-only
 
 Expected: `Version: v1.18.0`. Pass → 4.2.2. Fail → stop (check the URL; this assumes amd64).
 
-**4.2.2 — Point Velero and kubectl at the cluster.**
+**4.2.2 — Confirm Velero sees the cluster.** 4.2.0 already set `KUBECONFIG`.
 
 ```bash
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
 sudo -E velero version --client-only      # v1.18.0
-sudo k3s kubectl get nodes                # k3-master Ready
+sudo k3s kubectl get nodes                # Ready
 ```
 
-Expected: the node is `Ready`. Pass → 4.2.3. Fail → stop; fix K3s health first.
+Expected: the node is `Ready`. Pass → 4.2.3. Fail → paste 4.2.0 again; if still failing, fix K3s.
 
-**4.2.3 — Confirm the install script is present.**
-
-Stay at the **clone root**. `~` and `~/poc-k3-backup/scripts` both fail later steps: `$PWD/velero-credentials`
-will be wrong, and `./scripts/...` will not exist.
+**4.2.3 — Confirm the installer path 4.2.0 chose.**
 
 ```bash
-cd ~/poc-k3-backup
-pwd
-# must print /home/ubuntu/poc-k3-backup
-# not /home/ubuntu
-# not /home/ubuntu/poc-k3-backup/scripts
-
-# This repo keeps Velero files under scripts/velero/. An older clone may be flat under scripts/.
-ls -l ./scripts/velero/install-velero.sh ./scripts/install-velero.sh
+echo "$VELERO_INSTALLER"
+ls -l "$VELERO_INSTALLER"
 ```
 
-Expected: **at least one** of those two files is listed. Pass → 4.2.4. Fail → stop; the repo isn't
-on the server — clone/copy it, then come back.
+Expected: the file is listed. This node uses
+`/home/ubuntu/poc-k3-backup/scripts/install-velero.sh` if `scripts/velero/` is missing. Pass →
+4.2.4. Fail → stop; clone/copy the repo, then paste 4.2.0 again.
 
-On this node the file is `./scripts/install-velero.sh`. Use that path in 4.2.6.
+**4.2.4 — Create the Velero credentials file.** Once. Use the **`k3-master-velero`** key from 2.5 —
+**not** the Job 1 key — and never commit this file. This node keeps it at
+`$HOME/poc-k3-backup/scripts/velero-credentials` (already moved there). Do not `git add` it.
 
-**4.2.4 — Create the Velero credentials file.** Use the **`k3-master-velero`** key from 2.5 — **not**
-the `k3-master-backup-writer` key, and never commit this file.
-
-Run this **after** the `cd ~/poc-k3-backup` in 4.2.3, so the file lands in the clone root. If you
-already created it in `~` (`/home/ubuntu/velero-credentials`), skip the `cat` and either move it
-in or point `CREDS_FILE` at that absolute path in 4.2.5.
+Skip this `cat` if `ls -l "$HOME/poc-k3-backup/scripts/velero-credentials"` already shows `-rw-------`.
 
 ```bash
-cat > ./velero-credentials <<'EOF'
+cat > "$HOME/poc-k3-backup/scripts/velero-credentials" <<'EOF'
 [default]
 aws_access_key_id=PUT_K3-MASTER-VELERO_ACCESS_KEY_HERE
 aws_secret_access_key=PUT_K3-MASTER-VELERO_SECRET_KEY_HERE
 EOF
-chmod 600 ./velero-credentials
-ls -l ./velero-credentials
+chmod 600 "$HOME/poc-k3-backup/scripts/velero-credentials"
+ls -l "$HOME/poc-k3-backup/scripts/velero-credentials"
 ```
 
-Expected: the file shows `-rw-------`. Pass → 4.2.5. Fail → stop; fix permissions first.
+Expected: `-rw-------` and
+`/home/ubuntu/poc-k3-backup/scripts/velero-credentials`. Pass → paste **4.2.0 again**
+(so `OK: credentials` appears) → 4.2.5.
 
-**4.2.5 — Set the four install values.** Edit the first two lines to your real Stage 2 values.
-`cd ~/poc-k3-backup` first if this is a new shell.
+**4.2.5 — Recheck the four install values.** No new exports — 4.2.0 already set them.
 
 ```bash
-cd ~/poc-k3-backup
-
-# EDIT THESE TWO to match Stage 2:
-export S3_BUCKET="k3-master-dr"           # your exact bucket name (step 2.2)
-export AWS_REGION="us-east-1"             # your bucket's region (step 2.1)
-
-# KUBELET_ROOT_DIR is already right (confirmed in 4.1).
-# CREDS_FILE: use $PWD/... if the file is in the clone root; use the home path if it is still in ~.
-export KUBELET_ROOT_DIR="/var/lib/kubelet"
-export CREDS_FILE="$PWD/velero-credentials"
-# this node's copy is in home — uncomment if ls below cannot find $PWD/velero-credentials:
-# export CREDS_FILE="/home/ubuntu/velero-credentials"
-
 printf 'S3_BUCKET=%s\nAWS_REGION=%s\nCREDS_FILE=%s\nKUBELET_ROOT_DIR=%s\n' \
   "$S3_BUCKET" "$AWS_REGION" "$CREDS_FILE" "$KUBELET_ROOT_DIR"
 ls -l "$CREDS_FILE"
 ```
 
-Expected: all four print, none blank, region is **your** region (e.g. `us-east-1`), and `ls` shows
-`-rw-------`. Pass → 4.2.6. Fail → stop; re-set whichever is blank or wrong.
+Expected: none blank, `CREDS_FILE=/home/ubuntu/poc-k3-backup/scripts/velero-credentials`, `ls` shows `-rw-------`. Pass →
+4.2.6. Fail → paste 4.2.0 again. Empty values mean this is a new shell.
 
-**4.2.6 — Run the installer.** Still from `~/poc-k3-backup`:
+**4.2.6 — Run the installer.**
 
 ```bash
-# older / this-node clone (flat scripts/):
-sudo -E ./scripts/install-velero.sh
-
-# current GitHub layout instead:
-# sudo -E ./scripts/velero/install-velero.sh
+sudo -E "$VELERO_INSTALLER"
 ```
 
 Expected: it finishes without error and prints follow-up commands. Pass → 4.2.7. Fail → stop; read
-the last error line.
+the last error line. If it says `VELERO_INSTALLER: unbound variable` or the path is empty, you
+skipped 4.2.0.
 
-> **Why `sudo -E`:** it passes your four exported values and `KUBECONFIG` into the root shell the
-> installer runs in. The script pins Velero server `v1.18.0` and AWS plugin `v1.14.1`, enables the
-> node-agent, and configures filesystem backup for `local-path` volumes. No encryption flags are
-> passed — the bucket's SSE-S3 default encrypts every object.
+> **Why `sudo -E`:** it passes the 4.2.0 exports into the root shell. The script pins Velero server
+> `v1.18.0` and AWS plugin `v1.14.1`, enables the node-agent, and configures filesystem backup for
+> `local-path` volumes. No encryption flags are passed — the bucket's SSE-S3 default encrypts every
+> object.
 
 **4.2.7 — Apply both schedules, then delete the credentials file.**
 
-Still from `~/poc-k3-backup`. This node's clone listed no `schedule-*.yaml` under `scripts/` —
-if `ls` below fails, copy `scripts/velero/schedule-daily.yaml` and `schedule-weekly.yaml` from the
-current repo onto the node before applying.
-
 ```bash
-ls -l scripts/velero/schedule-daily.yaml scripts/velero/schedule-weekly.yaml
-sudo k3s kubectl apply -f scripts/velero/schedule-daily.yaml
-sudo k3s kubectl apply -f scripts/velero/schedule-weekly.yaml
-shred -u ./velero-credentials
-# if the key was created in home instead:
-# shred -u /home/ubuntu/velero-credentials
+ls -l "$VELERO_SCRIPTS"/schedule-daily.yaml "$VELERO_SCRIPTS"/schedule-weekly.yaml
+sudo k3s kubectl apply -f "$VELERO_SCRIPTS"/schedule-daily.yaml
+sudo k3s kubectl apply -f "$VELERO_SCRIPTS"/schedule-weekly.yaml
+shred -u "$CREDS_FILE"
 ```
 
 Expected: both schedules `created`; the credentials file is gone. Pass → 4.2.8.
 
+If `ls` says no such file, this clone is old — copy `schedule-daily.yaml` and
+`schedule-weekly.yaml` from this repo's `scripts/velero/` into `"$VELERO_SCRIPTS"` on the node,
+then re-run the `kubectl apply` lines. Do not skip the schedules.
+
 > **Why:** daily runs Mon–Sat and weekly runs Sunday; both back up all PVC data via filesystem
 > backup. The key now lives only as a Kubernetes Secret, so nothing plaintext is left on disk.
 
-**4.2.8 — Verify the install.**
+**4.2.8 — Verify the install.** Paste 4.2.0 first if this is a new shell.
 
 ```bash
 sudo -E velero version                                    # server v1.18.0
@@ -1223,7 +1255,7 @@ sudo k3s kubectl -n velero get schedules                  # daily and weekly Ena
 
 Expected: server `v1.18.0`, all pods `Running`, BSL `Available`, both schedules `Enabled`. Pass →
 4.3. Fail → stop; a BSL that isn't `Available` almost always means a wrong bucket/region/key in
-4.2.5. Record the CLI, server and plugin versions in [01](01-discovery-baseline.md).
+4.2.0. Record the CLI, server and plugin versions in [01](01-discovery-baseline.md).
 
 ### 4.3 — Prove the node-agent actually reads the volumes
 

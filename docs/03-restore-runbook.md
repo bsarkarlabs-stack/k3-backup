@@ -26,10 +26,10 @@ Four flows. You almost always want the second one.
 | You need | Details |
 |----------|---------|
 | An AWS login that can read the bucket | Your normal admin or SSO login. There is deliberately no separate stored restore key — [02 §3](02-backup-strategy.md#two-workload-credentials-separated-by-failure-domain) |
-| The bucket name and region | `k3-master-dr`, `ap-south-1` — written down outside AWS as well |
+| The bucket name and region | `k3-master-dr-sep-07`, `us-east-1` — written down outside AWS as well |
 | A replacement server | 8 cores, 22 GB RAM, ≥97 GB disk, x86_64, Ubuntu 24.04 LTS |
 | The K3s version | **Don't guess — read it out of `MANIFEST.json`.** It was `v1.34.5+k3s1` when this was written |
-| This repository | Clone it before the outage procedure needs `scripts/velero/` or copy the pinned scripts into the recovery kit |
+| This repository | Clone it before the outage procedure needs `scripts/velero/` (this GitHub tree) or `scripts/install-velero.sh` (older node clone). Copy the pinned scripts into the recovery kit |
 | Recovery tools | AWS CLI v2, `python3`, `tar`, `sha256sum`, `kubectl`, the Velero CLI version pinned by `install-velero.sh`, and a working kubeconfig |
 | ArgoCD access | `argocd` CLI plus admin access, or use the documented `kubectl` checks instead |
 
@@ -48,7 +48,7 @@ Each successful run has a unique UTC prefix. `COMPLETE.json` is uploaded last; i
 without it, because it may be a partial upload.
 
 ```bash
-export BUCKET=k3-master-dr AWS_DEFAULT_REGION=ap-south-1
+export BUCKET=k3-master-dr-sep-07 AWS_DEFAULT_REGION=us-east-1
 
 # List only committed restore sets and choose the newest one.
 aws s3api list-objects-v2 --bucket "$BUCKET" --prefix k3s/daily/ \
@@ -319,9 +319,16 @@ aws_secret_access_key=<…>
 EOF
 chmod 600 ./velero-credentials
 
-export S3_BUCKET=k3-master-dr AWS_REGION=ap-south-1 CREDS_FILE=./velero-credentials
+export S3_BUCKET=k3-master-dr-sep-07 AWS_REGION=us-east-1 CREDS_FILE=./velero-credentials
 export KUBELET_ROOT_DIR=/var/lib/kubelet   # use the path verified on this node
-./scripts/velero/install-velero.sh
+if [ -f ./scripts/velero/install-velero.sh ]; then
+  ./scripts/velero/install-velero.sh
+elif [ -f ./scripts/install-velero.sh ]; then
+  ./scripts/install-velero.sh
+else
+  echo "STOP: install-velero.sh not found" >&2
+  exit 1
+fi
 
 # make the backup location read-only until you have verified the restore
 kubectl -n velero patch backupstoragelocation default \
@@ -434,8 +441,10 @@ Only once step 11 has actually passed, give the rebuilt server back its ability 
 kubectl -n velero patch backupstoragelocation default \
   --type merge -p '{"spec":{"accessMode":"ReadWrite"}}'
 
+# this GitHub repo:
 kubectl apply -f scripts/velero/schedule-daily.yaml
 kubectl apply -f scripts/velero/schedule-weekly.yaml
+# older node clone (flat scripts/): kubectl apply -f scripts/schedule-daily.yaml and schedule-weekly.yaml
 
 # Job 1 and the Velero verifier are not in the archive — reinstall them from
 # this repo before trusting the rebuilt host to back itself up. Follow
@@ -640,8 +649,16 @@ sudo systemctl restart k3s
 
 # 4. install the pinned Velero version with the verified kubelet root and keep
 #    the BackupStorageLocation ReadOnly
+export S3_BUCKET=k3-master-dr-sep-07 AWS_REGION=us-east-1
 export KUBELET_ROOT_DIR=/var/lib/kubelet
-./scripts/velero/install-velero.sh
+if [ -f ./scripts/velero/install-velero.sh ]; then
+  ./scripts/velero/install-velero.sh
+elif [ -f ./scripts/install-velero.sh ]; then
+  ./scripts/install-velero.sh
+else
+  echo "STOP: install-velero.sh not found" >&2
+  exit 1
+fi
 kubectl -n velero patch backupstoragelocation default \
   --type merge -p '{"spec":{"accessMode":"ReadOnly"}}'
 
