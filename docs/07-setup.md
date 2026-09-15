@@ -12,6 +12,7 @@ are **further reading**, not prerequisites.
 |---|---|
 | Bucket | `k3-master-dr-sep-07` |
 | Region | `us-east-1` |
+| Kubernetes node | `ip-172-31-28-133` (`Ready`, `control-plane`) |
 | Clone on the node | `~/poc-k3-backup` |
 | Velero credentials (temporary on node) | `~/poc-k3-backup/scripts/velero-credentials` → Kubernetes Secret → shred. Never a laptop file. |
 | Installer on this node | `~/poc-k3-backup/scripts/install-velero.sh` |
@@ -1050,17 +1051,16 @@ Use that path in 4.2.4 instead of `/var/lib/kubelet`.
 
 Stay in `~/poc-k3-backup`. Do not `cd scripts/`.
 
-**4.2.1 — Set four values and verify paths**
+**4.2.1 — Confirm installer path**
 
 **Run:**
 
 ```bash
 cd ~/poc-k3-backup
 ls -l /home/ubuntu/poc-k3-backup/scripts/install-velero.sh
-sudo k3s kubectl get nodes
 ```
 
-**Expected:** installer listed (`-rwx…`); node `Ready`.
+**Expected:** installer listed (`-rwx…`).
 
 **If fail:** this GitHub tree keeps the installer at `scripts/velero/install-velero.sh` — use that
 path in 4.2.4 instead. STOP if neither file exists.
@@ -1075,13 +1075,9 @@ curl -fsSL -o /tmp/velero.tgz \
   "https://github.com/vmware-tanzu/velero/releases/download/${VELERO_VERSION}/velero-${VELERO_VERSION}-linux-amd64.tar.gz"
 tar -xzf /tmp/velero.tgz -C /tmp
 sudo install -m 0755 "/tmp/velero-${VELERO_VERSION}-linux-amd64/velero" /usr/local/bin/velero
-velero version --client-only
-sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero version --client-only
 ```
 
-**Expected:** `Version: v1.18.0`.
-
-**If fail:** STOP (URL / amd64).
+**Expected:** CLI on disk. Client check is in 4.2.4 (same kubeconfig the installer uses).
 
 **4.2.3 — Create the Velero credentials file on the node** (once)
 
@@ -1102,12 +1098,39 @@ ls -l /home/ubuntu/poc-k3-backup/scripts/velero-credentials
 
 **Expected:** `-rw-------` `/home/ubuntu/poc-k3-backup/scripts/velero-credentials`. Do not `git add`.
 
-**4.2.4 — Run the installer** (values are in the command — a new shell is fine)
+**4.2.4 — Gate, then run the installer**
 
-**Run:**
+This does **not** restart K3s. It creates the `velero` namespace and resources, the AWS plugin, and
+the node-agent. PVC data on `local-path` is backed up by that node-agent only.
+
+**Run first (required):**
+
+```bash
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+  k3s kubectl get nodes
+```
+
+**Expected:**
+
+```text
+NAME                  STATUS   ROLES           AGE   VERSION
+ip-172-31-28-133...   Ready    control-plane   ...   ...
+```
+
+```bash
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+  velero version --client-only
+```
+
+**Expected:** `Version: v1.18.0`.
+
+**If fail:** STOP. Do not run the installer.
+
+**Then:**
 
 ```bash
 sudo env \
+  KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
   S3_BUCKET=k3-master-dr-sep-07 \
   AWS_REGION=us-east-1 \
   CREDS_FILE=/home/ubuntu/poc-k3-backup/scripts/velero-credentials \
@@ -1118,7 +1141,7 @@ sudo env \
 If this GitHub clone has `scripts/velero/install-velero.sh` instead, use that path as the last
 argument.
 
-**Expected:** finishes without error.
+**Expected:** finishes without error. K3s is still running; no restart.
 
 **If fail:** last error line. Wrong bucket/region/key is the usual cause.
 
