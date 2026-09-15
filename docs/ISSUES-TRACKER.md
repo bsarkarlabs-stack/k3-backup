@@ -76,16 +76,15 @@ Commands: [07 steps 2.1–3.8](07-setup.md#stage-2--create-the-bucket-and-two-sc
 ### 4. [#11](../../../issues/11) — Phase 3: Job 2, Velero
 **Priority: Highest — this is half the design and currently doesn't exist at all**
 
-Commands: [07 steps 4.1–4.6](07-setup.md#stage-4--deploy-job-2-velero).
+Commands: [07 steps 4.1–4.5 now](07-setup.md#stage-4--deploy-job-2-velero); [4.6 deferred 8 days](07-setup.md#46--post-deployment-check--do-after-8-days). Never `sudo -E`.
 
 - Find K3s's kubelet root **before** trusting anything
 - Install Velero CLI `v1.18.0`; run the installer with AWS plugin `v1.14.1`, verified
   `KUBELET_ROOT_DIR`, node-agent on, `prefix=velero`, no volume snapshots,
   `--default-volumes-to-fs-backup`
 - Apply `schedule-daily.yaml` and `schedule-weekly.yaml`
-- **Verify the node-agent really reads the volumes:** `velero backup describe <name> --details` must
-  list all six monitoring PVCs under *Pod Volume Backups*. An empty list is a silent total failure
-  that still reports success
+- **Verify the node-agent really reads the volumes:** record the actual PodVolumeBackup count; empty
+  list is a silent total failure that still reports `Completed`. Do not assume six PVCs.
 - Confirm the `argocd` namespace backup contains its Secrets and Applications (retires #20/#1)
 - One object restore into a scratch namespace ([07 step 4.5](07-setup.md#45--prove-one-narrow-restore)).
   Do **not** delete a production PVC during setup — that proof belongs in the restore test

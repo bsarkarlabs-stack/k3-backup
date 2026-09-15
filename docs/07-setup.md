@@ -1,100 +1,111 @@
 # 07 — Setup, stage by stage
 
-The hands-on companion to [04 — Implementation TODO](04-implementation-todo.md). Every command is
-meant to be run **one at a time**, checking the "check" that follows before moving on.
+This file is the **executable source of truth**. Run it top to bottom. Other docs
+([01](01-discovery-baseline.md)–[06](06-developer-access.md), [ISSUES-TRACKER](ISSUES-TRACKER.md))
+are **further reading**, not prerequisites.
 
 **Target server:** `k3-master` (`45.90.98.51`) — live production, **zero tolerance for downtime**.
 
-**This deployment — copy these values everywhere.** `k3-master-dr` was taken, so Stage 2 used a
-suffix. Do not paste the old example name or Mumbai region.
+**This deployment — copy these values. Do not substitute examples from older drafts.**
 
 | | |
 |---|---|
 | Bucket | `k3-master-dr-sep-07` |
 | Region | `us-east-1` |
 | Clone on the node | `~/poc-k3-backup` |
-| Velero credentials on the node | `~/poc-k3-backup/scripts/velero-credentials` (shred after 4.2.7; do not commit) |
+| Velero credentials (temporary on node) | `~/poc-k3-backup/scripts/velero-credentials` → Kubernetes Secret → shred. Never a laptop file. |
 | Installer on this node | `~/poc-k3-backup/scripts/install-velero.sh` |
 | Installer in this GitHub repo | `scripts/velero/install-velero.sh` |
+
+### Five golden rules
+
+1. **`[local]` vs `[node]`.** Laptop snippets stay on the laptop. Node snippets stay on SSH.
+2. **Never `sudo -E`.** This node's sudo rejects it. Pass vars with `sudo env KEY=value …` or run
+   Velero as `sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero …`.
+3. **Job 1 key ≠ Velero key.** `backup.env` is Job 1 only. Velero uses a node temp file, then a
+   Secret, then that file is shredded.
+4. **Stay in `~/poc-k3-backup`.** Do not `cd scripts/`.
+5. **New shell:** `export` dies. Re-copy the command from the step — install commands embed the
+   four values, so you do not need a mega “4.2.0” block.
+
+Standard step format below: **Goal → Run → Expected → If fail.** Optional *Why* is after the
+command, or in [Design notes](#design-notes-and-troubleshooting) at the bottom.
 
 Five stages, in order:
 
 | Stage | What it does | Steps | Where | Downtime risk |
 |-------|--------------|-------|-------|---------------|
-| [1](#stage-1--validate-the-server) | Validate — is everything we assumed still true? | 1.1–1.7 | `[node]` | **None** — read-only |
-| [2](#stage-2--create-the-bucket-and-two-scoped-workload-credentials) | Create the bucket and two scoped AWS credentials | 2.1–2.7 | `[local]` | **None** — doesn't touch the server |
-| [3](#stage-3--deploy-job-1) | Deploy Job 1: the K3s backup + timer | 3.1–3.8 | `[node]` | **Very low** — only reads K3s's data |
-| [4](#stage-4--deploy-job-2-velero) | Deploy Job 2: Velero, and prove it reads the volumes | 4.1–4.6 | `[node]` | Low — installs into the cluster |
-| [5](#stage-5--monitoring-and-the-restore-test) | Wire and test the four alerts, then prove a restore works | 5.1–5.7 | both | **None** |
+| [1](#stage-1--validate-the-server) | Validate the server | 1.1–1.7 | `[node]` | **None** — read-only |
+| [2](#stage-2--create-the-bucket-and-two-scoped-workload-credentials) | Bucket + two IAM keys | 2.1–2.7 | `[local]` | **None** |
+| [3](#stage-3--deploy-job-1) | Job 1: K3s backup + timer | 3.1–3.8 | `[node]` | **Very low** |
+| [4](#stage-4--deploy-job-2-velero) | Job 2: Velero + prove volumes | 4.1–4.5 **now**; 4.6 deferred | `[node]` | Low |
+| [5](#stage-5--monitoring-and-the-restore-test) | Alerts, then restore test | 5.1–5.7 **starts right after 4.5** | both | **None** |
 
-**Every step is tagged with where you run it.** Get this wrong and commands fail in confusing ways,
-or a credential lands on the wrong machine.
+**Required now vs deferred**
 
-- **`[local]`** — your own laptop, in a terminal with your AWS admin login. On Windows use Git Bash
-  or WSL so the `bash` snippets work. Nothing here is typed on the server.
-- **`[node]`** — an SSH session on `k3-master` (`ssh <user>@45.90.98.51`), as a user who can `sudo`.
-- **`[decision]`** — no command; a thing to agree and write down.
+| When | Steps |
+|------|--------|
+| **Required now** | 1.1 → 4.5, then Stage 5 |
+| **Deferred verification** | [4.6](#46--post-deployment-check--do-after-8-days) — calendar reminder 8 days out. Do **not** wait here before Stage 5. |
+
+**Every step is tagged with where you run it.**
+
+- **`[local]`** — your laptop, AWS admin login. Windows: Git Bash or WSL.
+- **`[node]`** — SSH on `k3-master` (`ssh <user>@45.90.98.51`), user can `sudo`.
+- **`[decision]`** — write something down; no command.
 
 If a snippet is tagged `[local]` do **not** paste it into the server session, and vice versa.
 
-### Every step, in order
+### Every step
 
-This is the full list. [04 — Implementation TODO](04-implementation-todo.md) is the same work as
-checkboxes and [ISSUES-TRACKER](ISSUES-TRACKER.md) is where the answers get pasted; nothing is
-required of you that isn't a step below.
+| Step | What you do | When | Where |
+|------|-------------|------|-------|
+| [1.1](#11--run-the-preflight-checker-node) | Preflight `--no-aws` | now | `[node]` |
+| [1.2](#12--confirm-the-baseline-still-holds-node) | Hostname, **capture live K3s version**, disk, datastore | now | `[node]` |
+| [1.3](#13--look-inside-tls-and-cred-node) | List `tls/` `cred/`; record cert expiry | now | `[node]` |
+| [1.4](#14--is-secrets-encryption-on-node) | `k3s secrets-encrypt status` | now | `[node]` |
+| [1.5](#15--where-do-the-https-certificates-come-from-node) | Where Traefik HTTPS certs live | now | `[node]` |
+| [1.6](#16--confirm-a-safe-sqlite-backup-is-possible-node) | Python `sqlite3` module | now | `[node]` |
+| [1.7](#17--agree-an-rpo-and-an-rto-decision) | Agree RPO/RTO or record the assumption | now | decision |
+| [2.1](#21--region-is-us-east-1) | Confirm region `us-east-1` | now | `[local]` |
+| [2.2](#22--create-the-bucket) | Create the bucket | now | `[local]` |
+| [2.3](#23--lock-it-down-before-anything-is-uploaded) | Block public access, versioning, SSE-S3, HTTPS-only | now | `[local]` |
+| [2.4](#24--retention-rules) | Six lifecycle rules | now | `[local]` |
+| [2.5](#25--create-separate-job-1-and-velero-credentials) | Job 1 + Velero IAM keys | now | `[local]` |
+| [2.6](#26--check-all-of-stage-2-at-once) | Verify bucket and IAM | now | `[local]` |
+| [2.7](#27--write-down-who-can-restore-local) | Two people who can restore | now | writing |
+| [3.1](#31--write-the-config-node) | `/etc/k3s-backup/backup.env` | now | `[node]` |
+| [3.2](#32--install-the-script-and-units-node) | Script + units | now | `[node]` |
+| [3.3](#33--re-run-the-preflight-this-time-with-aws-node) | Preflight with AWS | now | `[node]` |
+| [3.4](#34--write-down-the-current-state-so-you-can-prove-nothing-changed-node) | Record `NRestarts` | now | `[node]` |
+| [3.5](#35--dry-run-build-the-archive-upload-nothing-node) | `DRY_RUN=1` | now | `[node]` |
+| [3.6](#36--first-real-run-node) | First real upload | now | `[node]` |
+| [3.7](#37--verify-the-archive-off-the-server-local) | Download + checksum | now | `[local]` |
+| [3.8](#38--turn-the-schedule-on-node) | Enable timer | now | `[node]` |
+| [4.1](#41--find-the-kubelet-root) | Confirm `/var/lib/kubelet` | now | `[node]` |
+| [4.2](#42--install-velero) | Four values → CLI → creds → installer → verify | now | `[node]` |
+| [4.3](#43--prove-the-node-agent-actually-reads-the-volumes) | Record **actual** PodVolumeBackup count | now | `[node]` |
+| [4.4](#44--confirm-object-coverage-including-argocd) | Cluster objects + `argocd` | now | `[node]` |
+| [4.5](#45--test-kubernetes-object-restore-only--pvc-restore-not-tested-yet) | ConfigMap restore only | now | `[node]` |
+| [4.6](#46--post-deployment-check--do-after-8-days) | Confirm Velero TTL expiry | **deferred 8 days** | `[node]` |
+| [5.1](#51--choose-the-two-dead-man-checks-local) | Two dead-man checks | now (after 4.5) | `[local]` |
+| [5.2](#52--wire-job-1s-heartbeat-node) | Job 1 heartbeat | now | `[node]` |
+| [5.3](#53--install-the-velero-verifier-and-its-heartbeat-node) | Verifier + `MIN_EXPECTED_PVBS` from 4.3 | now | `[node]` |
+| [5.4](#54--alert-on-root-disk-space-node) | Disk alert | now | `[node]` |
+| [5.5](#55--break-every-alert-on-purpose) | Break alerts on purpose | now | both |
+| [5.6](#56--watch-the-first-few-runs-node) | Watch a few runs | now | `[node]` |
+| [5.7](#57--prove-a-restore-works) | Restore test (includes PVC) | now | `[local]` |
 
-| Step | What you do | Where | Why it's on the list |
-|------|-------------|-------|----------------------|
-| [1.1](#11--run-the-preflight-checker-node) | Run the preflight with `--no-aws` | `[node]` | Finds local blockers before any AWS resource exists |
-| [1.2](#12--confirm-the-baseline-still-holds-node) | Re-confirm hostname, version, service, disk, datastore | `[node]` | [01](01-discovery-baseline.md) is only useful if it's still true |
-| [1.3](#13--look-inside-tls-and-cred-node) | List `tls/` and `cred/`; record certificate expiry | `[node]` | Nothing identity-related may sit outside the backup's paths |
-| [1.4](#14--is-secrets-encryption-on-node) | `k3s secrets-encrypt status` | `[node]` | Decides how hard a precondition `cred/` is at restore |
-| [1.5](#15--where-do-the-https-certificates-come-from-node) | Find where Traefik's HTTPS certificates live | `[node]` | The one answer that can change the design |
-| [1.6](#16--confirm-a-safe-sqlite-backup-is-possible-node) | Confirm Python's `sqlite3` module works | `[node]` | Keeps this design free of new software on production |
-| [1.7](#17--agree-an-rpo-and-an-rto-decision) | **Agree an RPO and an RTO**, or record the assumption | decision | "Daily" is arbitrary until these two numbers exist |
-| [2.1](#21--pick-a-region) | Pick a region | `[local]` | Can't be changed later |
-| [2.2](#22--create-the-bucket) | Create the bucket | `[local]` | — |
-| [2.3](#23--lock-it-down-before-anything-is-uploaded) | Block public access, versioning, SSE-S3, HTTPS-only policy | `[local]` | This bucket holds the cluster CA |
-| [2.4](#24--retention-rules) | Six lifecycle rules | `[local]` | Without them nothing ever expires |
-| [2.5](#25--create-separate-job-1-and-velero-credentials) | Create the Job 1 and Velero credentials | `[local]` | Two failure domains, two keys |
-| [2.6](#26--check-all-of-stage-2-at-once) | Verify every bucket and IAM setting | `[local]` | The only place bucket config is checked |
-| [2.7](#27--write-down-who-can-restore-local) | Name who can restore; record bucket, region, key owners | writing | No stored restore key means access must not be one person |
-| [3.1](#31--write-the-config-node) | Write `/etc/k3s-backup/backup.env` | `[node]` | — |
-| [3.2](#32--install-the-script-and-units-node) | Install the script and both units | `[node]` | — |
-| [3.3](#33--re-run-the-preflight-this-time-with-aws-node) | Preflight with AWS; read-back and delete must be refused | `[node]` | Proves the write-only credential really is write-only |
-| [3.4](#34--write-down-the-current-state-so-you-can-prove-nothing-changed-node) | Record `NRestarts` and node state | `[node]` | The baseline for the zero-downtime claim |
-| [3.5](#35--dry-run-build-the-archive-upload-nothing-node) | `DRY_RUN=1` run; check the manifest | `[node]` | Builds everything, uploads nothing |
-| [3.6](#36--first-real-run-node) | First real run; confirm the committed set in S3 | `[node]` | — |
-| [3.7](#37--verify-the-archive-off-the-server-local) | Download it and verify the integrity chain | `[local]` | Practises the restore-time check while nothing is on fire |
-| [3.8](#38--turn-the-schedule-on-node) | Enable the timer | `[node]` | — |
-| [4.1](#41--find-the-kubelet-root) | Find K3s's kubelet root | `[node]` | A mismatch backs up **nothing** and still says `Completed` |
-| [4.2](#42--install-velero) | Install Velero (start every session with 4.2.0, then 4.2.1–4.2.8) | `[node]` | — |
-| [4.3](#43--prove-the-node-agent-actually-reads-the-volumes) | Prove all six PVCs appear as Pod Volume Backups | `[node]` | [gap 6](05-gaps-and-open-questions.md#6-whether-veleros-node-agent-can-actually-read-our-volumes) — the likeliest silent failure |
-| [4.4](#44--confirm-object-coverage-including-argocd) | Confirm cluster-scoped objects and the `argocd` namespace | `[node]` | What retires a separate ArgoCD export |
-| [4.5](#45--prove-one-narrow-restore) | Restore one object into a scratch namespace | `[node]` | The 10-minute flow you'll actually use most |
-| [4.6](#46--a-week-later-confirm-backups-expire) | A week later: confirm old backups expire | `[node]` | Proves Velero's delete permission is right |
-| [5.1](#51--choose-the-two-dead-man-checks-local) | Create two external dead-man checks | `[local]` | [gap 2](05-gaps-and-open-questions.md#2-the-external-heartbeats-have-nowhere-to-report-yet) — alerts 1 and 2 |
-| [5.2](#52--wire-job-1s-heartbeat-node) | Set `HEARTBEAT_URL` and confirm the ping | `[node]` | Alert 1 |
-| [5.3](#53--install-the-velero-verifier-and-its-heartbeat-node) | Install the verifier, its timer and `MIN_EXPECTED_PVBS` | `[node]` | Alerts 2 and 3 |
-| [5.4](#54--alert-on-root-disk-space-local) | Alert on root disk under 10% | `[local]` | Alert 4 |
-| [5.5](#55--break-every-alert-on-purpose) | Break all four alerts deliberately | both | An untested alert is a decoration |
-| [5.6](#56--watch-the-first-few-runs-node) | Watch two or three runs, then stop | `[node]` | — |
-| [5.7](#57--prove-a-restore-works) | Run the restore test on a throwaway VM | `[local]` | **Nothing before this counts as proven** |
+**Ground rules.** Stages 1–3 do not restart K3s. If you are about to type `systemctl restart k3s`,
+stop. Keep a second SSH session open.
 
-**Ground rules.** Nothing in stages 1–3 restarts, reloads or reconfigures K3s. If you find yourself
-about to type `systemctl restart k3s`, you've gone off-script — stop. Keep a second SSH session
-open the whole time. Go top to bottom; later steps depend on earlier ones.
-
-**Record the whole session, so every step's output is saved.** Only a few steps below pipe their own
-output to a log; the rest (1.2, 1.3, the stage-4 checks, and so on) just print to screen. Rather than
-add `tee` to every command, capture the entire session **once** with `script` — it saves everything
-you see, from every step, into one transcript file you can re-read or hand over:
+**Record the session:**
 
 ```bash
-# [node] — run this first thing after you SSH in, before step 1.1
+# [node] — first thing after SSH, before 1.1
 script -q ~/k3s-setup-$(date +%F-%H%M).log
-# ...now run every step normally; all output is being recorded...
-exit            # stops recording and closes the transcript
+# ...run every step...
+exit
 ```
 
 Do the same on `[local]` for the AWS stage if you want those captured too. Read a transcript back
@@ -195,25 +206,25 @@ too.)
 
 ### 1.2 — Confirm the baseline still holds `[node]`
 
+**Goal:** host is healthy; capture the **live** K3s version (do not expect a historical string).
+
+**Run:**
+
 ```bash
 hostnamectl | head -3
-k3s --version
+CURRENT_K3S_VERSION=$(k3s --version | awk '{print $3; exit}')
+echo "CURRENT_K3S_VERSION=$CURRENT_K3S_VERSION"
 systemctl is-active k3s && systemctl is-enabled k3s
 df -h / && df -i /
 sudo ls -la /var/lib/rancher/k3s/server/db/
 sudo k3s etcd-snapshot ls 2>&1 | head -2
 ```
 
-**Check:**
+**Expected:** hostname prints; `CURRENT_K3S_VERSION` is non-empty (example at discovery was
+`v1.34.5+k3s1` — **newer is fine**); k3s `active` and `enabled`; ≥5 GB free on `/`; `db/` has
+`state.db`, `state.db-wal`, `state.db-shm`; `etcd-snapshot ls` still says datastore disabled.
 
-- Hostname `k3-master`, K3s `v1.34.5+k3s1`, service both `active` and `enabled`.
-- **At least 5 GB free** on `/`. We recorded 34 GB at discovery.
-- `db/` contains `state.db`, `state.db-wal`, `state.db-shm`.
-- `etcd-snapshot ls` still says `etcd datastore disabled` — confirming we really do need the SQLite
-  approach, not a K3s built-in snapshot.
-
-> If the K3s version has changed, update [01](01-discovery-baseline.md). A restore needs the
-> matching version, and `MANIFEST.json` will record whatever is actually installed.
+**If fail:** STOP. Write `CURRENT_K3S_VERSION` down — 3.5/3.6 must match it in `MANIFEST.json`.
 
 ### 1.3 — Look inside `tls/` and `cred/` `[node]`
 
@@ -356,33 +367,28 @@ Git. There are **four** places things live, and each one holds different things.
 
 | Where | What lives there | Permanent? |
 |-------|------------------|------------|
-| **Laptop `[local]`** | Your AWS admin profile; temporary `/tmp/k3-dr-*.json` policy files; a temporary `./velero-credentials` file | **No** — the `/tmp` files and `velero-credentials` are deleted once used |
-| **AWS** | The S3 bucket; IAM users `k3-master-backup-writer` and `k3-master-velero`; their inline policies and access keys | Yes |
-| **`k3-master` `[node]`** | `/etc/k3s-backup/backup.env` — holds **only** the Job 1 key | Yes |
-| **Kubernetes** | The Velero AWS key, stored as a Secret in the `velero` namespace (the installer creates it) | Yes |
-| **This Git repo** | Scripts, docs, systemd units, Velero YAML — **never a real key** | Yes |
+| **Laptop `[local]`** | AWS admin profile; temporary `/tmp/k3-dr-*.json` policy files only | **No** — delete `/tmp` JSON after Stage 2 |
+| **AWS** | Bucket; IAM users `k3-master-backup-writer` and `k3-master-velero`; keys | Yes |
+| **`k3-master` `[node]`** | `/etc/k3s-backup/backup.env` — **Job 1 key only**. Velero key is a **temporary** file at `~/poc-k3-backup/scripts/velero-credentials` during 4.2, then shredded | backup.env yes; velero-credentials **no** |
+| **Kubernetes** | Velero AWS key as a Secret in `velero` (installer creates it) | Yes |
+| **This Git repo** | Scripts, docs, units, YAML — **never a real key** | Yes |
 
-Two rules that fall out of the map:
+Two rules:
 
-- **The Velero key never goes in `backup.env`.** `backup.env` is Job 1 only. The Velero key reaches
-  the cluster through the installer, as a Kubernetes Secret, and its laptop copy is shredded after.
-- **No real key ever gets committed.** `.gitignore` already blocks `backup.env`, `*.credentials`,
-  `velero-credentials`, `*.key` and `.env*`; the two access-key secrets are shown once by AWS, so
-  save them in a password manager, not in a file in this repo.
+- **The Velero key never goes in `backup.env`.** On the node: temp file → installer → Kubernetes
+  Secret → `shred`. No laptop copy.
+- **No real key ever gets committed.** `.gitignore` already blocks `backup.env`, `velero-credentials`,
+  `*.key`. Save access-key secrets in a password manager.
 
-The temporary laptop files you will create and then delete:
+Temporary files (deleted after use):
 
 ```text
-/tmp/k3-dr-bucket-policy.json     bucket HTTPS-only policy   (step 2.3)
-/tmp/k3-dr-lifecycle.json         retention rules            (step 2.4)
-/tmp/k3-dr-writer-policy.json     Job 1 IAM policy           (step 2.5)
-/tmp/k3-dr-velero-policy.json     Velero IAM policy          (step 2.5)
-./velero-credentials              Velero key, for the installer only (step 4.2)
+/tmp/k3-dr-bucket-policy.json     bucket HTTPS-only policy   (step 2.3)  [local]
+/tmp/k3-dr-lifecycle.json         retention rules            (step 2.4)  [local]
+/tmp/k3-dr-writer-policy.json     Job 1 IAM policy           (step 2.5)  [local]
+/tmp/k3-dr-velero-policy.json     Velero IAM policy          (step 2.5)  [local]
+~/poc-k3-backup/scripts/velero-credentials   Velero key      (step 4.2)  [node] then shred
 ```
-
-Each of these is only a *helper* that hands a document to AWS or the installer. The real
-configuration ends up inside AWS, on the node, or in the cluster — never in these files, which is
-why every one of them is deleted once it has done its job.
 
 ---
 
@@ -397,23 +403,16 @@ aws sts get-caller-identity      # is this the account that should own the DR bu
 
 If it isn't, set `AWS_PROFILE` (see the variable block above) until this shows the correct account.
 
-### 2.1 — Pick a region
+### 2.1 — Region is `us-east-1`
 
-A region is just *which AWS data centre stores the files*. It **can't be changed later** — moving
-means a new bucket and copying everything across. Our daily upload is ~20 MB, so speed is
-irrelevant; pick on cost and on where the team and any compliance requirements are.
+**Goal:** use the region this bucket already lives in. It cannot be changed later.
 
-| Region | Code | Good when |
-|--------|------|-----------|
-| Mumbai | `ap-south-1` | Team is in India. Design default; **this deployment did not use it** |
-| N. Virginia | `us-east-1` | Cheapest. **This deployment.** One quirk, noted in 2.2 |
-| Frankfurt | `eu-central-1` | Closest to the Datalix server; keeps data in the EU |
+**Run:** none — already chosen.
 
-> **Why off-site at all:** this server is on-premise-style with no hosting-provider snapshot. A
-> backup that only lives on `k3-master` dies with `k3-master`. Any off-server destination would do
-> — S3 is just the one we picked, and only the upload step in the script would change. What is
-> **not** acceptable is a destination on the same disk, including the MinIO running inside our own
-> cluster.
+**Expected:** `REGION=us-east-1` in the laptop exports above.
+
+Region-selection theory (Mumbai / Frankfurt / cost) lives in
+[02](02-backup-strategy.md). Do not re-pick here.
 
 ### 2.2 — Create the bucket
 
@@ -792,9 +791,8 @@ sudo sh -c 'ls -lah /var/backups/k3s/*/'          # the files inside it
 > `sudo sh -c '...'` makes **root's** shell do the expansion. The plain `sudo ls -lah
 > /var/backups/k3s/` works without the wrapper because it has no wildcard.
 
-**Check:** the script should print `snapshot ok (read-only), integrity_check=ok`, then
-`manifest: k3s=v1.34.5+k3s1 …`, then an archive size around 20 MB. In the staging folder you should
-see four things — the `.tar.gz`, its `.sha256`, `MANIFEST.json`, and `COMPLETE.json`.
+**Expected:** `snapshot ok (read-only), integrity_check=ok`, then `manifest: k3s=<CURRENT_K3S_VERSION from 1.2>`.
+Archive ~20 MB. Staging folder has `.tar.gz`, `.sha256`, `MANIFEST.json`, `COMPLETE.json`.
 
 Look inside without extracting anything:
 
@@ -837,9 +835,8 @@ restoring only some of them produces a cluster that won't trust its own data.)
 
 **Check the manifest**, because it's the file a restore reads first:
 
-- `k3s_version` is a real version, **not** `unknown`. If it says `unknown` the script couldn't read
-  `/usr/local/bin/k3s` — fix that before going further, a manifest without a version defeats the
-  point of having one.
+- `k3s_version` **equals** `CURRENT_K3S_VERSION` from 1.2 (whatever is installed now). If it says
+  `unknown`, STOP — the script could not read `/usr/local/bin/k3s`.
 - `k3s_start_command` contains the real start flags, including any `--tls-san`.
 - `archive.sha256` and `archive.bytes` are filled in.
 
@@ -883,13 +880,13 @@ sudo bash -c '
 > root, so no `sudo -E` is needed.
 
 ```text
-k3s/daily/2026-09-02T021500Z/COMPLETE.json
-k3s/daily/2026-09-02T021500Z/MANIFEST.json
-k3s/daily/2026-09-02T021500Z/k3s-2026-09-02T021500Z.tar.gz
-k3s/daily/2026-09-02T021500Z/k3s-2026-09-02T021500Z.tar.gz.sha256
-k3s-release/v1.34.5+k3s1/RESTORE.txt
-k3s-release/v1.34.5+k3s1/k3s
-k3s-release/v1.34.5+k3s1/k3s.sha256
+k3s/daily/<run-id>/COMPLETE.json
+k3s/daily/<run-id>/MANIFEST.json
+k3s/daily/<run-id>/k3s-<run-id>.tar.gz
+k3s/daily/<run-id>/k3s-<run-id>.tar.gz.sha256
+k3s-release/<CURRENT_K3S_VERSION>/RESTORE.txt
+k3s-release/<CURRENT_K3S_VERSION>/k3s
+k3s-release/<CURRENT_K3S_VERSION>/k3s.sha256
 ```
 
 **That folder is one complete restore set.** The `k3s-release/` upload happens once per version —
@@ -946,12 +943,13 @@ archive = json.load(open("MANIFEST.json"))["archive"]
 actual = digest(archive["filename"])
 assert actual == archive["sha256"], f"archive mismatch: {actual}"
 print(f"chain verified: COMPLETE.json -> MANIFEST.json -> {archive['filename']}")
+print("k3s_version:", json.load(open("MANIFEST.json"))["k3s_version"])
 PY
 ```
 
-That chain check is exactly what
-[restore step 1](03-restore-runbook.md#step-1--pick-a-backup-and-read-its-manifest) tells you to run
-during an outage — practise it here, while nothing is on fire.
+That `k3s_version` must equal `CURRENT_K3S_VERSION` from 1.2. This is the same chain
+[restore step 1](03-restore-runbook.md#step-1--pick-a-backup-and-read-its-manifest) uses in an
+outage.
 
 ```bash
 tar -xzf k3s-*.tar.gz
@@ -993,17 +991,9 @@ sudo systemctl status k3s-backup.service --no-pager
 sudo journalctl -u k3s-backup.service -n 40 --no-pager
 ```
 
-**Check:** `status=0/SUCCESS`, and the log ends with `completed successfully`.
+**Expected:** `status=0/SUCCESS`, log ends `completed successfully`.
 
-> **If it fails with `tar: … Cannot stat: Function not implemented`** while the script works when run
-> by hand: that's a seccomp mismatch, not a bug in the backup. systemd installs a seccomp filter for
-> hardening directives like `RestrictSUIDSGID=`/`LockPersonality=`, and on a host whose `libseccomp`
-> is older than the kernel that filter returns `ENOSYS` for `statx()`, which GNU `tar` uses. The
-> shipped unit deliberately omits those directives, so first make sure the installed unit matches the
-> repo (`sudo install -m 0644 -o root -g root /tmp/k3s-backup.service /etc/systemd/system/` then
-> `sudo systemctl daemon-reload`) and re-run. If you keep a hardened variant, `sudo apt-get install
-> --only-upgrade libseccomp2` (so it knows `statx`) is the alternative fix. Then clear the failed
-> run's leftover stage dir: `sudo sh -c 'rm -rf /var/backups/k3s/*/'`.
+**If fail:** exact error `tar: … Cannot stat: Function not implemented` → [T3](#t3--systemd-tar-statx). Other errors: STOP and read the journal.
 
 Only now:
 
@@ -1019,135 +1009,65 @@ before the 03:30 UTC Velero window. The script also takes a lock, so two Job 1 r
 
 ## Stage 4 — Deploy Job 2 (Velero)
 
-**This is half the design, not an optional extra.** Job 1 cannot restore a deleted PVC or a single
-deleted Secret, and `local-path` destroys a volume's files the instant its PVC goes away.
+Job 1 cannot restore a deleted PVC or Secret. Do **all of Stage 4 on the node**. After **4.5**, go
+straight to Stage 5. **4.6 waits 8 days** — set a reminder; do not block.
 
-**One rule for all of Stage 4: do everything on `k3-master`, over SSH. Don't use your laptop.** Every
-step below is written the same way — *what it does*, the *command*, and the *expected output*, with
-"go on / stop" at the end. Two fixed conventions so nothing branches:
+Conventions (golden rule 2):
 
-- Run Velero as **`sudo -E velero …`** — it reads `KUBECONFIG` from the new-shell block in 4.2.0.
-- Run Kubernetes commands as **`sudo k3s kubectl …`** — K3s's built-in client, nothing to install.
-
-If the SSH session drops, or you open a new terminal, **paste 4.2.0 again** before the next
-command. `export` values do not survive a new shell.
-
-> **Why on the node, not the laptop:** Velero installs *into* the cluster, and `k3-master` already
-> has the cluster, the repo and the credentials nearby. A laptop only adds a kubeconfig copy and a
-> second place for the Velero key to leak. This stage adds Velero alongside the running cluster — it
-> never restarts or stops K3s or your workloads.
+```text
+Velero:     sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero …
+Kubernetes: sudo k3s kubectl …
+Never:      sudo -E …
+```
 
 ### 4.1 — Find the kubelet root
 
-RUN ON: k3-master
+**Goal:** Velero must read `/var/lib/kubelet/pods`. Wrong path → empty backup that still says
+`Completed`.
 
-Velero's file-system backup reads pod volumes through a hostPath into the *kubelet root*. If it's
-wrong the backup starts cleanly and copies **nothing** — an empty backup that still says `Completed`.
-
-Confirm three things first: the kubeconfig exists, the node API answers, and the default pods
-directory is present.
-
-**Kubeconfig is on disk.** Do **not** `cat` this file into chat, tickets, or the `script` transcript
-from the start of this doc — it is the cluster admin key.
+**Run:**
 
 ```bash
 sudo test -r /etc/rancher/k3s/k3s.yaml && echo "OK: kubeconfig exists"
 sudo grep -E '^\s+server:' /etc/rancher/k3s/k3s.yaml
-```
-
-Expected: `OK: kubeconfig exists` and `server: https://127.0.0.1:6443`. Pass → the next command.
-Fail → stop; K3s is not installed the way later `KUBECONFIG=` lines assume.
-
-**The node config API answers.** This is the same endpoint 4.1 uses if the kubelet root is not the
-default; a JSON blob means `k3s kubectl` can talk to the local API:
-
-```bash
-sudo k3s kubectl get --raw "/api/v1/nodes/$(hostname)/proxy/configz" 2>/dev/null | head -c 500; echo
-```
-
-Expected: a JSON object (it often starts with `cloudcontrollermanager.config.k8s.io`). Pass → the
-pods check. Empty output or an error → stop; fix K3s/`kubectl` before installing Velero.
-
-**The default kubelet pods dir exists:**
-
-```bash
-sudo test -d /var/lib/kubelet/pods \
-  && echo "OK: /var/lib/kubelet/pods exists" \
-  || echo "NOT FOUND"
-```
-
-Expected: `OK: /var/lib/kubelet/pods exists`. Then list it:
-
-```bash
+sudo test -d /var/lib/kubelet/pods && echo "OK: /var/lib/kubelet/pods exists" || echo "NOT FOUND"
 sudo ls -la /var/lib/kubelet/pods | head -3
 ```
 
-Expected output: the `pods` directory exists and lists a few entries.
+**Expected:** `OK` lines, `server: https://127.0.0.1:6443`, `pods` lists directories.
 
-- Lists directories → the kubelet root is `/var/lib/kubelet`. Go to 4.2.
-- `NOT FOUND` or *No such file or directory* → find the real path with the command below and use it
-  wherever 4.2 says `KUBELET_ROOT_DIR`:
+**If fail:** STOP. Do not `cat` `k3s.yaml` into chat. If `NOT FOUND`:
 
 ```bash
 sudo k3s kubectl get --raw "/api/v1/nodes/$(hostname)/proxy/configz" | tr ',' '\n' | grep -i rootdir
 ```
 
+Use that path in 4.2.4 instead of `/var/lib/kubelet`.
+
 ### 4.2 — Install Velero
 
-RUN ON: k3-master
+**Goal:** CLI → creds file on the node → installer → schedules → shred creds → verify.
 
-Do **4.2.0 every time this terminal is new**. Then 4.2.1 → 4.2.8. Paths are absolute on purpose —
-do not `cd` into `scripts/` to run commands. Stay at `~/poc-k3-backup`.
+Stay in `~/poc-k3-backup`. Do not `cd scripts/`.
 
-**4.2.0 — New shell (paste this whole block first).**
+**4.2.1 — Set four values and verify paths**
 
-Do this: after SSH, after `exit`, after a disconnect, before 4.2.6 / 4.2.7 / 4.2.8. Bucket and
-region below are **this deployment** (`k3-master-dr-sep-07` / `us-east-1`).
+**Run:**
 
 ```bash
 cd ~/poc-k3-backup
-
-export KUBECONFIG=/etc/rancher/k3s/k3s.yaml
-export KUBELET_ROOT_DIR=/var/lib/kubelet
-export S3_BUCKET=k3-master-dr-sep-07
-export AWS_REGION=us-east-1
-export CREDS_FILE="$HOME/poc-k3-backup/scripts/velero-credentials"
-
-if [ -f "$PWD/scripts/velero/install-velero.sh" ]; then
-  export VELERO_INSTALLER="$PWD/scripts/velero/install-velero.sh"
-  export VELERO_SCRIPTS="$PWD/scripts/velero"
-elif [ -f "$PWD/scripts/install-velero.sh" ]; then
-  export VELERO_INSTALLER="$PWD/scripts/install-velero.sh"
-  export VELERO_SCRIPTS="$PWD/scripts"
-else
-  echo "STOP: install-velero.sh not found under $PWD/scripts"
-fi
-
-echo "PWD=$PWD"
-echo "S3_BUCKET=$S3_BUCKET"
-echo "AWS_REGION=$AWS_REGION"
-echo "CREDS_FILE=$CREDS_FILE"
-echo "KUBELET_ROOT_DIR=$KUBELET_ROOT_DIR"
-echo "VELERO_INSTALLER=$VELERO_INSTALLER"
-echo "VELERO_SCRIPTS=$VELERO_SCRIPTS"
-
-[ "$PWD" = "$HOME/poc-k3-backup" ] && echo "OK: clone root" || echo "STOP: not in ~/poc-k3-backup"
-[ -r "$CREDS_FILE" ] && echo "OK: credentials" || echo "STOP: create $CREDS_FILE in 4.2.4"
-[ -f "$VELERO_INSTALLER" ] && echo "OK: installer" || echo "STOP: clone missing install-velero.sh"
+ls -l /home/ubuntu/poc-k3-backup/scripts/install-velero.sh
 sudo k3s kubectl get nodes
 ```
 
-Expected:
+**Expected:** installer listed (`-rwx…`); node `Ready`.
 
-- `PWD=/home/ubuntu/poc-k3-backup`
-- `S3_BUCKET=k3-master-dr-sep-07`
-- `AWS_REGION=us-east-1`
-- `OK: clone root`, `OK: installer`, node `Ready`
-- `OK: credentials` after 4.2.4 exists; `STOP: create …` is fine **only** before 4.2.4
+**If fail:** this GitHub tree keeps the installer at `scripts/velero/install-velero.sh` — use that
+path in 4.2.4 instead. STOP if neither file exists.
 
-Pass → 4.2.1 (first time) or 4.2.6 (if CLI + credentials already exist). Fail → stop.
+**4.2.2 — Install the Velero CLI v1.18.0** (once per node)
 
-**4.2.1 — Install the Velero CLI v1.18.0.** Once per node.
+**Run:**
 
 ```bash
 VELERO_VERSION=v1.18.0
@@ -1156,214 +1076,175 @@ curl -fsSL -o /tmp/velero.tgz \
 tar -xzf /tmp/velero.tgz -C /tmp
 sudo install -m 0755 "/tmp/velero-${VELERO_VERSION}-linux-amd64/velero" /usr/local/bin/velero
 velero version --client-only
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero version --client-only
 ```
 
-Expected: `Version: v1.18.0`. Pass → 4.2.2. Fail → stop (check the URL; this assumes amd64).
+**Expected:** `Version: v1.18.0`.
 
-**4.2.2 — Confirm Velero sees the cluster.** 4.2.0 already set `KUBECONFIG`.
+**If fail:** STOP (URL / amd64).
 
-```bash
-sudo -E velero version --client-only      # v1.18.0
-sudo k3s kubectl get nodes                # Ready
-```
+**4.2.3 — Create the Velero credentials file on the node** (once)
 
-Expected: the node is `Ready`. Pass → 4.2.3. Fail → paste 4.2.0 again; if still failing, fix K3s.
+Use the **`k3-master-velero`** key from 2.5 — not Job 1. Skip `cat` if the file already exists
+`-rw-------`.
 
-**4.2.3 — Confirm the installer path 4.2.0 chose.**
+**Run:**
 
 ```bash
-echo "$VELERO_INSTALLER"
-ls -l "$VELERO_INSTALLER"
-```
-
-Expected: the file is listed. This node uses
-`/home/ubuntu/poc-k3-backup/scripts/install-velero.sh` if `scripts/velero/` is missing. Pass →
-4.2.4. Fail → stop; clone/copy the repo, then paste 4.2.0 again.
-
-**4.2.4 — Create the Velero credentials file.** Once. Use the **`k3-master-velero`** key from 2.5 —
-**not** the Job 1 key — and never commit this file. This node keeps it at
-`$HOME/poc-k3-backup/scripts/velero-credentials` (already moved there). Do not `git add` it.
-
-Skip this `cat` if `ls -l "$HOME/poc-k3-backup/scripts/velero-credentials"` already shows `-rw-------`.
-
-```bash
-cat > "$HOME/poc-k3-backup/scripts/velero-credentials" <<'EOF'
+cat > /home/ubuntu/poc-k3-backup/scripts/velero-credentials <<'EOF'
 [default]
 aws_access_key_id=PUT_K3-MASTER-VELERO_ACCESS_KEY_HERE
 aws_secret_access_key=PUT_K3-MASTER-VELERO_SECRET_KEY_HERE
 EOF
-chmod 600 "$HOME/poc-k3-backup/scripts/velero-credentials"
-ls -l "$HOME/poc-k3-backup/scripts/velero-credentials"
+chmod 600 /home/ubuntu/poc-k3-backup/scripts/velero-credentials
+ls -l /home/ubuntu/poc-k3-backup/scripts/velero-credentials
 ```
 
-Expected: `-rw-------` and
-`/home/ubuntu/poc-k3-backup/scripts/velero-credentials`. Pass → paste **4.2.0 again**
-(so `OK: credentials` appears) → 4.2.5.
+**Expected:** `-rw-------` `/home/ubuntu/poc-k3-backup/scripts/velero-credentials`. Do not `git add`.
 
-**4.2.5 — Recheck the four install values.** No new exports — 4.2.0 already set them.
+**4.2.4 — Run the installer** (values are in the command — a new shell is fine)
+
+**Run:**
 
 ```bash
-printf 'S3_BUCKET=%s\nAWS_REGION=%s\nCREDS_FILE=%s\nKUBELET_ROOT_DIR=%s\n' \
-  "$S3_BUCKET" "$AWS_REGION" "$CREDS_FILE" "$KUBELET_ROOT_DIR"
-ls -l "$CREDS_FILE"
+sudo env \
+  S3_BUCKET=k3-master-dr-sep-07 \
+  AWS_REGION=us-east-1 \
+  CREDS_FILE=/home/ubuntu/poc-k3-backup/scripts/velero-credentials \
+  KUBELET_ROOT_DIR=/var/lib/kubelet \
+  /home/ubuntu/poc-k3-backup/scripts/install-velero.sh
 ```
 
-Expected: none blank, `CREDS_FILE=/home/ubuntu/poc-k3-backup/scripts/velero-credentials`, `ls` shows `-rw-------`. Pass →
-4.2.6. Fail → paste 4.2.0 again. Empty values mean this is a new shell.
+If this GitHub clone has `scripts/velero/install-velero.sh` instead, use that path as the last
+argument.
 
-**4.2.6 — Run the installer.**
+**Expected:** finishes without error.
+
+**If fail:** last error line. Wrong bucket/region/key is the usual cause.
+
+**4.2.5 — Apply schedules, then shred the node credentials file**
+
+**Run:**
 
 ```bash
-sudo -E "$VELERO_INSTALLER"
+ls -l /home/ubuntu/poc-k3-backup/scripts/schedule-daily.yaml \
+      /home/ubuntu/poc-k3-backup/scripts/schedule-weekly.yaml
+sudo k3s kubectl apply -f /home/ubuntu/poc-k3-backup/scripts/schedule-daily.yaml
+sudo k3s kubectl apply -f /home/ubuntu/poc-k3-backup/scripts/schedule-weekly.yaml
+shred -u /home/ubuntu/poc-k3-backup/scripts/velero-credentials
 ```
 
-Expected: it finishes without error and prints follow-up commands. Pass → 4.2.7. Fail → stop; read
-the last error line. If it says `VELERO_INSTALLER: unbound variable` or the path is empty, you
-skipped 4.2.0.
+If `ls` fails, copy `scripts/velero/schedule-daily.yaml` and `schedule-weekly.yaml` from this GitHub
+repo into `~/poc-k3-backup/scripts/` on the node, then re-apply. Or apply from
+`~/poc-k3-backup/scripts/velero/` if that directory exists.
 
-> **Why `sudo -E`:** it passes the 4.2.0 exports into the root shell. The script pins Velero server
-> `v1.18.0` and AWS plugin `v1.14.1`, enables the node-agent, and configures filesystem backup for
-> `local-path` volumes. No encryption flags are passed — the bucket's SSE-S3 default encrypts every
-> object.
+**Expected:** both schedules `created`; credentials file gone. Key now exists only as a Kubernetes
+Secret.
 
-**4.2.7 — Apply both schedules, then delete the credentials file.**
+**4.2.6 — Verify the install**
+
+**Run:**
 
 ```bash
-ls -l "$VELERO_SCRIPTS"/schedule-daily.yaml "$VELERO_SCRIPTS"/schedule-weekly.yaml
-sudo k3s kubectl apply -f "$VELERO_SCRIPTS"/schedule-daily.yaml
-sudo k3s kubectl apply -f "$VELERO_SCRIPTS"/schedule-weekly.yaml
-shred -u "$CREDS_FILE"
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero version
+sudo k3s kubectl -n velero get pods -o wide
+sudo k3s kubectl -n velero get backupstoragelocation
+sudo k3s kubectl -n velero get schedules
 ```
 
-Expected: both schedules `created`; the credentials file is gone. Pass → 4.2.8.
+**Expected:** server `v1.18.0`, pods `Running`, BSL `Available`, schedules `Enabled`. Then 4.3.
 
-If `ls` says no such file, this clone is old — copy `schedule-daily.yaml` and
-`schedule-weekly.yaml` from this repo's `scripts/velero/` into `"$VELERO_SCRIPTS"` on the node,
-then re-run the `kubectl apply` lines. Do not skip the schedules.
-
-> **Why:** daily runs Mon–Sat and weekly runs Sunday; both back up all PVC data via filesystem
-> backup. The key now lives only as a Kubernetes Secret, so nothing plaintext is left on disk.
-
-**4.2.8 — Verify the install.** Paste 4.2.0 first if this is a new shell.
-
-```bash
-sudo -E velero version                                    # server v1.18.0
-sudo k3s kubectl -n velero get pods -o wide               # velero + node-agent Running
-sudo k3s kubectl -n velero get backupstoragelocation      # PHASE Available
-sudo k3s kubectl -n velero get schedules                  # daily and weekly Enabled
-```
-
-Expected: server `v1.18.0`, all pods `Running`, BSL `Available`, both schedules `Enabled`. Pass →
-4.3. Fail → stop; a BSL that isn't `Available` almost always means a wrong bucket/region/key in
-4.2.0. Record the CLI, server and plugin versions in [01](01-discovery-baseline.md).
+**If fail:** BSL not `Available` → bucket/region/key in 4.2.4.
 
 ### 4.3 — Prove the node-agent actually reads the volumes
 
-RUN ON: k3-master
+**Goal:** a `Completed` backup with **copied volumes**. Record the **actual** PodVolumeBackup count
+(do not assume 6).
 
-A green checkmark is not evidence — this is
-[gap 6](05-gaps-and-open-questions.md#6-whether-veleros-node-agent-can-actually-read-our-volumes),
-the likeliest silent failure in the design. Run one real backup and confirm the volumes are in it.
-
-Command:
+**Run:**
 
 ```bash
-sudo -E velero backup create verify-$(date +%s) --wait
-sudo -E velero backup get                                 # note the exact NAME just created
-sudo -E velero backup describe <name> --details | sed -n '/Pod Volume Backups/,/^$/p'
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup create verify-$(date +%s) --wait
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup get
+# put the NAME from the line above into <name>:
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup describe <name> --details \
+  | sed -n '/Pod Volume Backups/,/^$/p'
 sudo k3s kubectl -n velero get podvolumebackups \
-  -l velero.io/backup-name=<name> --no-headers | wc -l    # expect 6
+  -l velero.io/backup-name=<name> --no-headers | wc -l
 ```
 
-Expected: the backup is `Completed` and **six** pod volumes appear (one per monitoring PVC).
+**Expected:** backup `Completed`; count ≥ 1. Write that integer down as `MIN_EXPECTED_PVBS` for 5.3.
 
-- Count is 6 → write it down as `MIN_EXPECTED_PVBS` for 5.3. Go to 4.4.
-- "Pod Volume Backups" empty / count 0 → **stop.** The node-agent hostPath doesn't match the kubelet
-  root from 4.1. Fix `KUBELET_ROOT_DIR` and re-run 4.2.6.
+**If fail:** count `0` → STOP. Node-agent hostPath ≠ kubelet root. Fix `KUBELET_ROOT_DIR` in 4.2.4
+and re-install.
 
-> **Why 6, not the PVC count:** an unmounted claim produces no pod volume, and a volume mounted by
-> two pods produces two. The number that matters is what the node-agent actually copied.
+Unmounted PVCs produce no pod volume; a volume on two pods produces two. Use what the node-agent
+copied, not the PVC list.
 
 ### 4.4 — Confirm object coverage, including ArgoCD
 
-RUN ON: k3-master
-
-The backup takes everything by default; this just confirms there's no surprise, and it's what lets
-you retire a separate `argocd admin export` (the *ArgoCD recoverability* entry in
-[ISSUES-TRACKER](ISSUES-TRACKER.md)).
-
-Command (reuse the `<name>` from 4.3):
+**Run:**
 
 ```bash
-sudo -E velero backup describe <name> --details | grep -E 'customresourcedefinitions|clusterroles|storageclasses'
-sudo -E velero backup describe <name> --details | grep -E 'argocd/'
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup describe <name> --details \
+  | grep -E 'customresourcedefinitions|clusterroles|storageclasses'
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup describe <name> --details \
+  | grep -E 'argocd/'
 ```
 
-Expected: CRDs, ClusterRoles and the StorageClass appear, and the `argocd` namespace contributes
-Secrets, Applications and AppProjects. Pass → 4.5. Fail → stop; missing cluster-scoped objects mean
-the backup isn't cluster-wide.
+**Expected:** CRDs, ClusterRoles, StorageClass, and `argocd/` objects. Then 4.5.
 
-> **Why:** anything created by hand in the ArgoCD UI comes back from Velero, not from Git. Also note
-> **which Git repos and logins ArgoCD depends on** — Velero restores the Application objects, not
-> access to a repo whose deploy key nobody has.
+**If fail:** STOP; backup is not cluster-wide.
 
-### 4.5 — Prove one narrow restore
+### 4.5 — Test Kubernetes object restore only — PVC restore not tested yet
 
-RUN ON: k3-master
+**Goal:** prove Velero can restore a **ConfigMap**. This does **not** prove PVC/volume data. PVC
+restore is Stage **5.7**. Do not delete a production PVC here.
 
-The ~10-minute flow you'll use most. Full procedure:
-[03 §B](03-restore-runbook.md#b--restoring-one-pvc-or-one-object).
-
-Command:
+**Run:**
 
 ```bash
 sudo k3s kubectl create namespace restore-probe
 sudo k3s kubectl -n restore-probe create configmap probe --from-literal=k=v
-sudo -E velero backup create probe-$(date +%s) --include-namespaces restore-probe --wait
-sudo -E velero backup get                                 # note the probe backup NAME
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup create probe-$(date +%s) \
+  --include-namespaces restore-probe --wait
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup get
 
 sudo k3s kubectl delete namespace restore-probe
-sudo -E velero restore create --from-backup <probe-backup> --include-namespaces restore-probe --wait
-sudo k3s kubectl -n restore-probe get configmap probe -o jsonpath='{.data.k}{"\n"}'   # v
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero restore create \
+  --from-backup <probe-backup> --include-namespaces restore-probe --wait
+sudo k3s kubectl -n restore-probe get configmap probe -o jsonpath='{.data.k}{"\n"}'
 
 sudo k3s kubectl delete namespace restore-probe
 ```
 
-Expected: the ConfigMap comes back with value `v`. Pass → 4.6. Fail → stop; a restore that can't
-rebuild a ConfigMap won't rebuild anything.
+**Expected:** ConfigMap value `v`. **Pass → Stage 5 now.** Set a calendar reminder for 4.6 in 8 days.
 
-> **Why stop at a ConfigMap:** PVC data only returns when Velero recreates the pod, so a real volume
-> test needs the controller-aware procedure ([03 §B](03-restore-runbook.md#one-pvcs-data)) and is
-> exercised by the restore test in 5.7 — **don't** delete a production PVC here.
+**If fail:** STOP.
 
-### 4.6 — A week later: confirm backups expire
+### 4.6 — Post-deployment check — do after 8 days
 
-RUN ON: k3-master (set a calendar reminder for 8 days out)
+**Do not wait here.** Stage 5 starts immediately after 4.5.
 
-The only proof that Velero's delete permission works. If it doesn't, retention is fiction and the
-bucket grows forever.
+**Goal (day 8+):** Velero TTL actually deletes old backups.
 
-Command:
+**Run:**
 
 ```bash
-sudo -E velero backup get                                 # nothing older than 7 days in the daily tier
-sudo -E velero backup get -l velero.io/schedule-name=weekly
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup get
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup get -l velero.io/schedule-name=weekly
 ```
 
-Expected: daily-tier backups older than 168 h are gone, Sunday ones survive to 720 h, and the list
-is stable rather than growing every day. Pass → Stage 5. Fail → re-read the Velero policy in 2.5
-before touching the schedules.
+**Expected:** daily backups older than 168 h gone; Sunday ones remain to 720 h; list is not growing
+forever.
 
-> **Why not `aws s3 ls` here:** the only AWS key on `k3-master` is Job 1's, scoped to `k3s/` — it
-> can't list `velero/`. `velero backup get` reads the object store through Velero's own credential,
-> which is the right lens anyway.
+**If fail:** re-read the Velero IAM policy in 2.5.
 
 ---
 
 ## Stage 5 — Monitoring and the restore test
 
-Four alerts, and only four. Design and thresholds:
-[02 §7](02-backup-strategy.md#7-knowing-it-works).
+Starts **immediately after 4.5**. Do not wait for 4.6.
 
 | # | Alert | Threshold | Set up in |
 |---|-------|-----------|-----------|
@@ -1427,9 +1308,9 @@ sudo install -m 0750 /tmp/check-last-backup.sh /usr/local/sbin/check-last-velero
 sudo install -m 0644 /tmp/velero-backup-check.service \
   /tmp/velero-backup-check.timer /etc/systemd/system/
 sudo install -m 0600 /dev/null /etc/k3s-backup/velero-monitor.env
-sudo tee /etc/k3s-backup/velero-monitor.env >/dev/null <<'EOF'
+sudo tee /etc/k3s-backup/velero-monitor.env >/dev/null <<EOF
 VELERO_HEARTBEAT_URL=https://<velero-check-url>
-MIN_EXPECTED_PVBS=6
+MIN_EXPECTED_PVBS=<count-from-4.3>
 MAX_AGE_HOURS=30
 EOF
 sudo systemctl daemon-reload
@@ -1441,9 +1322,8 @@ sudo journalctl -u velero-backup-check.service -n 20 --no-pager
 **Check:** the log ends with `verified and reported <backup-name>`, the external check goes green,
 and `systemctl list-timers 'velero-backup-check*'` shows the next run at 06:30 UTC.
 
-`MIN_EXPECTED_PVBS` comes from the volume count you took in 4.3 — **not** from the PVC count. Raise
-or lower it whenever the mounted volume topology changes; leaving it stale is how a lost volume
-stops being noticed.
+`MIN_EXPECTED_PVBS` is the integer `wc -l` printed in 4.3 — the successful PodVolumeBackup count,
+not the PVC count. Change it when mounted-volume topology changes.
 
 The verifier records the UID of the backup it last reported in
 `/var/lib/k3s-backup/velero-last-reported` and refuses to ping twice for the same one, so a skipped
@@ -1452,14 +1332,14 @@ consequences to know before you go live: the first run after install pings immed
 deleting that state file causes one extra ping for a backup already reported. **Never "fix" a firing
 alert by deleting it.**
 
-### 5.4 — Alert on root disk space `[local]`
+### 5.4 — Alert on root disk space `[node]`
 
-The one in-cluster alert, because it's the one failure the cluster itself can still report. `/`
-holds the datastore, every `local-path` volume and the backup staging directory; at 100% full K3s
-stops writing and the backup fails with it.
+**Goal:** fire when `/` has under 10% free. Run on the **node** (no laptop kubeconfig).
+
+**Run:**
 
 ```bash
-kubectl get prometheusrule -A | head            # confirms the operator-based stack
+sudo k3s kubectl get prometheusrule -A | head
 ```
 
 If that returns rules, add one beside them:
@@ -1485,12 +1365,12 @@ spec:
             severity: warning
           annotations:
             summary: "k3-master root filesystem below 10% free"
-            runbook: "docs/07-setup.md#54--alert-on-root-disk-space-local"
+            runbook: "docs/07-setup.md#54--alert-on-root-disk-space-node"
 ```
 
 ```bash
-kubectl apply -f k3s-backup-host-rule.yaml
-kubectl -n monitoring get prometheusrule k3s-backup-host
+sudo k3s kubectl apply -f k3s-backup-host-rule.yaml
+sudo k3s kubectl -n monitoring get prometheusrule k3s-backup-host
 ```
 
 **Check:** the rule appears in Prometheus's *Rules* page and is not in `err` state. If this cluster
@@ -1508,7 +1388,7 @@ each time. Budget an hour; this is the step that finds the typo in the URL.
 | 1 | `sudo systemctl stop k3s-backup.timer` and leave it stopped past the grace window | The Job 1 dead-man check alerts at 26 h |
 | 2 | `sudo systemctl stop velero-backup-check.timer` for one cycle | The Velero check alerts at 30 h |
 | 2 (missed run) | After 5.3 has already reported a backup, run `sudo systemctl start velero-backup-check.service` again with **no** new Velero backup in between | Exits non-zero, logs "a scheduled run was missed", and **does not** ping. (5.3 already consumed the first ping; a second run is the test.) |
-| 3 (volume count) | `sudo sed -i 's/^MIN_EXPECTED_PVBS=.*/MIN_EXPECTED_PVBS=99/' /etc/k3s-backup/velero-monitor.env`, then run the service | Exits non-zero with "captured 6 pod volumes; expected at least 99", no ping. **Put the real value back** |
+| 3 (volume count) | Set `MIN_EXPECTED_PVBS` to `99` in `/etc/k3s-backup/velero-monitor.env`, then run the service | Exits non-zero with captured count vs 99, no ping. **Put the 4.3 value back** |
 | 4 | Temporarily lower the rule's threshold above current usage, or fill a scratch file | The disk alert fires, then remove the file and restore the threshold |
 
 Re-enable everything afterwards and confirm all four checks are green again:
@@ -1594,7 +1474,7 @@ Nothing in stages 1–3 modifies K3s, so undoing means "remove what we added."
 
 | Stage | How to undo |
 |-------|-------------|
-| 5.4 | `kubectl -n monitoring delete prometheusrule k3s-backup-host` |
+| 5.4 | `sudo k3s kubectl -n monitoring delete prometheusrule k3s-backup-host` |
 | 5.3 | Disable `velero-backup-check.timer`, remove its service/timer/script, `velero-monitor.env` and `/var/lib/k3s-backup/`, then `daemon-reload` |
 | 5.2 | Blank `HEARTBEAT_URL` in `backup.env`, and pause or delete the external checks |
 | 4 | `velero uninstall` (leaves the bucket data untouched), then `kubectl delete schedule daily weekly` first if you want them gone from the cluster's history |
@@ -1614,6 +1494,30 @@ sudo systemctl disable --now k3s-backup.timer
 
 That stops the backup completely and doesn't touch K3s. There's nothing to undo on the K3s side,
 because the script never writes to it.
+
+---
+
+## Design notes and troubleshooting
+
+Further reading (not required to execute this file): [01](01-discovery-baseline.md),
+[02](02-backup-strategy.md), [03](03-restore-runbook.md), [04](04-implementation-todo.md),
+[05](05-gaps-and-open-questions.md).
+
+**T3 — systemd tar statx.** If Job 1 fails under systemd with `tar: … Cannot stat: Function not
+implemented` but works by hand: systemd seccomp + old `libseccomp` vs `statx()`. Reinstall the unit
+from this repo (`sudo install -m 0644 -o root -g root /tmp/k3s-backup.service /etc/systemd/system/`
+then `daemon-reload`). Alternative: `sudo apt-get install --only-upgrade libseccomp2`. Then
+`sudo sh -c 'rm -rf /var/backups/k3s/*/'`.
+
+**Certificate self-renew.** Restoring a backup older than leaf-cert expiry can make K3s complain
+then re-issue from the CA. Master (`-ca.crt`) expiry within a year is a live-cluster problem, not a
+backup bug. Detail: 1.3 commands and [03 step 6](03-restore-runbook.md#step-6--start-k3s-and-verify-the-control-plane).
+
+**Region theory.** This deployment is `us-east-1`. Why off-site / other regions: [02](02-backup-strategy.md).
+
+**`sudo env` vs `sudo -E`.** This node rejects `sudo -E`. `sudo env KEY=value command` injects only
+the named vars. Root `install-velero.sh` reads `/etc/rancher/k3s/k3s.yaml` itself if `KUBECONFIG` is
+unset.
 
 ---
 

@@ -88,7 +88,7 @@ steps 2.1–3.8.
 This is the piece that makes PVC data and single-object restores possible at all. Nothing else in
 this plan covers either.
 
-Commands: [07 stage 4](07-setup.md#stage-4--deploy-job-2-velero), steps 4.1–4.6.
+Commands: [07 stage 4](07-setup.md#stage-4--deploy-job-2-velero), steps **4.1–4.5 now**; **4.6 is deferred 8 days** (do not block Stage 5).
 
 - [ ] Find K3s's kubelet root **before** trusting anything
       ([07 step 4.1](07-setup.md#41--find-the-kubelet-root))
@@ -97,14 +97,13 @@ Commands: [07 stage 4](07-setup.md#stage-4--deploy-job-2-velero), steps 4.1–4.
       layout) with AWS plugin `v1.14.1` and the verified `KUBELET_ROOT_DIR` — Velero +
       plugin, node-agent on, `prefix=velero`, `--use-volume-snapshots=false`,
       `--default-volumes-to-fs-backup`. The live node clone is older and keeps the same file at
-      `~/poc-k3-backup/scripts/install-velero.sh` — [07 step 4.2.0](07-setup.md#42--install-velero)
-      picks whichever exists. Bucket `k3-master-dr-sep-07`, region `us-east-1`.
+      `~/poc-k3-backup/scripts/install-velero.sh`. Use `sudo env KEY=value …` — never `sudo -E`.
+      Bucket `k3-master-dr-sep-07`, region `us-east-1`.
       ([07 step 4.2](07-setup.md#42--install-velero))
 - [ ] Apply [`schedule-daily.yaml`](../scripts/velero/schedule-daily.yaml) and
       [`schedule-weekly.yaml`](../scripts/velero/schedule-weekly.yaml)
-- [ ] **Verify the node-agent actually reads the volumes.** `velero backup describe <name> --details`
-      must list all six monitoring PVCs under *Pod Volume Backups*. An empty list means the hostPath
-      doesn't match the kubelet root — it fails silently and looks like success
+- [ ] **Verify the node-agent actually reads the volumes.** Record the **actual** PodVolumeBackup
+      count (`wc -l`); do not assume six PVCs. Empty list = silent failure.
       ([07 step 4.3](07-setup.md#43--prove-the-node-agent-actually-reads-the-volumes))
 - [ ] Confirm cluster-scoped resources are in the backup (CRDs, ClusterRoles, StorageClass)
       ([07 step 4.4](07-setup.md#44--confirm-object-coverage-including-argocd))
@@ -113,10 +112,10 @@ Commands: [07 stage 4](07-setup.md#stage-4--deploy-job-2-velero), steps 4.1–4.
 - [ ] Record the volume count from that verified backup — it becomes `MIN_EXPECTED_PVBS` in phase 4
       ([07 step 4.3](07-setup.md#43--prove-the-node-agent-actually-reads-the-volumes))
 - [ ] One **object** restore into a scratch namespace
-      ([07 step 4.5](07-setup.md#45--prove-one-narrow-restore)). Do **not** delete a
-      production PVC here — volume copy-back is proven in the restore test (phase 5 / §A step 9)
-- [ ] After a week, confirm old backups actually expire — proves the `velero/` delete permission is
-      right ([07 step 4.6](07-setup.md#46--a-week-later-confirm-backups-expire))
+      ([07 step 4.5](07-setup.md#45--test-kubernetes-object-restore-only--pvc-restore-not-tested-yet)).
+      PVC restore is **not** proven here — that is 5.7. Do **not** delete a production PVC.
+- [ ] **Deferred (8 days):** confirm old backups expire
+      ([07 step 4.6](07-setup.md#46--post-deployment-check--do-after-8-days)). Start Stage 5 after 4.5.
 - [ ] Pin the Velero CLI version to match `install-velero.sh` and record the CLI, server and plugin
       versions — `velero install` deploys `velero/velero:<CLI version>`, so an unpinned CLI silently
       decides the server version ([07 step 4.2](07-setup.md#42--install-velero))

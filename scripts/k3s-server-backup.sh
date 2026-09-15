@@ -48,8 +48,8 @@
 #     control plane for disk.
 #
 # Config comes from /etc/k3s-backup/backup.env (mode 0600, root:root):
-#   S3_BUCKET=k3-master-dr
-#   AWS_REGION=ap-south-1
+#   S3_BUCKET=k3-master-dr-sep-07
+#   AWS_REGION=us-east-1
 #   AWS_ACCESS_KEY_ID=...
 #   AWS_SECRET_ACCESS_KEY=...
 #   HEARTBEAT_URL=...        # optional but strongly recommended, see below

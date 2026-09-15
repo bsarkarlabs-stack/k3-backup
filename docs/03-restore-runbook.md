@@ -28,7 +28,7 @@ Four flows. You almost always want the second one.
 | An AWS login that can read the bucket | Your normal admin or SSO login. There is deliberately no separate stored restore key — [02 §3](02-backup-strategy.md#two-workload-credentials-separated-by-failure-domain) |
 | The bucket name and region | `k3-master-dr-sep-07`, `us-east-1` — written down outside AWS as well |
 | A replacement server | 8 cores, 22 GB RAM, ≥97 GB disk, x86_64, Ubuntu 24.04 LTS |
-| The K3s version | **Don't guess — read it out of `MANIFEST.json`.** It was `v1.34.5+k3s1` when this was written |
+| The K3s version | **Don't guess — read it out of `MANIFEST.json`.** |
 | This repository | Clone it before the outage procedure needs `scripts/velero/` (this GitHub tree) or `scripts/install-velero.sh` (older node clone). Copy the pinned scripts into the recovery kit |
 | Recovery tools | AWS CLI v2, `python3`, `tar`, `sha256sum`, `kubectl`, the Velero CLI version pinned by `install-velero.sh`, and a working kubeconfig |
 | ArgoCD access | `argocd` CLI plus admin access, or use the documented `kubectl` checks instead |
@@ -137,9 +137,11 @@ SSH identity is not something you want ([02 §4](02-backup-strategy.md#the-host-
 ### Step 3 — Install the exact K3s version, without starting it
 
 ```bash
+VER=$(python3 -c 'import json;print(json.load(open("MANIFEST.json"))["k3s_version"])')
+echo "installing $VER"
 curl -sfL https://get.k3s.io | \
-  INSTALL_K3S_VERSION="v1.34.5+k3s1" \
-  INSTALL_K3S_SKIP_START=true sh -        # ← version from MANIFEST.json
+  INSTALL_K3S_VERSION="$VER" \
+  INSTALL_K3S_SKIP_START=true sh -
 ```
 
 `INSTALL_K3S_SKIP_START=true` is the whole point of this step. It writes the binary and the systemd

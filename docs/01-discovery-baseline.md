@@ -3,8 +3,9 @@
 **Server:** `k3-master`
 **How sure are we:** Very. Every number below was actually checked on the real server — nothing
 here is a guess.
-**What this document is:** Just the facts, as they are right now. Any advice or decisions based on
-these facts live in [02 — Backup Strategy](02-backup-strategy.md), not here.
+**What this document is:** A **snapshot** of facts at discovery time. Live K3s version is captured
+in [07 step 1.2](07-setup.md#12--confirm-the-baseline-still-holds-node) — do not treat the version
+string below as a required install target. Advice lives in [02](02-backup-strategy.md).
 
 ---
 

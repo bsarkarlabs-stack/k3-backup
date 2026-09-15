@@ -113,7 +113,7 @@ The rest are in [05 — Gaps](docs/05-gaps-and-open-questions.md).
 ```text
 Server name    k3-master
 Operating system   Ubuntu 24.04.3 LTS, 64-bit
-K3s version    v1.34.5+k3s1
+K3s version    capture live: k3s --version   (discovery snapshot was v1.34.5+k3s1; do not require that string)
 Setup          One single server (no backup server, no high-availability)
 Database       SQLite (built into K3s — no separate database server)
 Storage        Files saved to local disk under /var/lib/rancher/k3s/storage
