@@ -28,6 +28,9 @@ are **further reading**, not prerequisites.
 4. **Stay in `~/poc-k3-backup`.** Do not `cd scripts/`.
 5. **New shell:** `export` dies. Re-copy the command from the step — install commands embed the
    four values, so you do not need a mega “4.2.0” block.
+6. **No angle-bracket names.** Backup names are printed first (`echo "VERIFY_BACKUP=$VERIFY_BACKUP"`).
+   Later commands use `"$VERIFY_BACKUP"`. If the shell died, copy the NAME column from
+   `velero backup get`. Heartbeat URLs come from 5.1, not from Velero.
 
 Standard step format below: **Goal → Run → Expected → If fail.** Optional *Why* is after the
 command, or in [Design notes](#design-notes-and-troubleshooting) at the bottom.
@@ -1184,19 +1187,50 @@ sudo k3s kubectl -n velero get schedules
 **Goal:** a `Completed` backup with **copied volumes**. Record the **actual** PodVolumeBackup count
 (do not assume 6).
 
-**Run:**
+**How the name works:** you **choose** it first. `date +%s` prints seconds (example
+`verify-1789486389`). That printed string **is** the backup name. There is no `<name>` to type.
+If this is a new shell, set `VERIFY_BACKUP=` to the NAME column from `velero backup get`.
+
+**Run 1 — pick the name and print it:**
 
 ```bash
-sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup create verify-$(date +%s) --wait
-sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup get
-# put the NAME from the line above into <name>:
-sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup describe <name> --details \
-  | sed -n '/Pod Volume Backups/,/^$/p'
-sudo k3s kubectl -n velero get podvolumebackups \
-  -l velero.io/backup-name=<name> --no-headers | wc -l
+VERIFY_BACKUP=verify-$(date +%s)
+echo "VERIFY_BACKUP=$VERIFY_BACKUP"
 ```
 
-**Expected:** backup `Completed`; count ≥ 1. Write that integer down as `MIN_EXPECTED_PVBS` for 5.3.
+**Expected:** one line like `VERIFY_BACKUP=verify-1789486389`. Copy that value if the shell dies.
+
+**Run 2 — create that backup:**
+
+```bash
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+  velero backup create "$VERIFY_BACKUP" --wait
+```
+
+**Expected:** phase `Completed`.
+
+**Run 3 — list names (confirm the NAME column matches `$VERIFY_BACKUP`):**
+
+```bash
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup get
+```
+
+**Run 4 — describe that same name:**
+
+```bash
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+  velero backup describe "$VERIFY_BACKUP" --details \
+  | sed -n '/Pod Volume Backups/,/^$/p'
+```
+
+**Run 5 — count volumes for that same name:**
+
+```bash
+sudo k3s kubectl -n velero get podvolumebackups \
+  -l velero.io/backup-name="$VERIFY_BACKUP" --no-headers | wc -l
+```
+
+**Expected:** count ≥ 1. Write that integer down as `MIN_EXPECTED_PVBS` for 5.3.
 
 **If fail:** count `0` → STOP. Node-agent hostPath ≠ kubelet root. Fix `KUBELET_ROOT_DIR` in 4.2.4
 and re-install.
@@ -1206,12 +1240,25 @@ copied, not the PVC list.
 
 ### 4.4 — Confirm object coverage, including ArgoCD
 
+Uses the **same** `$VERIFY_BACKUP` from 4.3. If this is a new shell:
+
+```bash
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup get
+VERIFY_BACKUP=verify-PASTE-THE-NAME-COLUMN-HERE
+echo "VERIFY_BACKUP=$VERIFY_BACKUP"
+```
+
 **Run:**
 
 ```bash
-sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup describe <name> --details \
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+  velero backup describe "$VERIFY_BACKUP" --details \
   | grep -E 'customresourcedefinitions|clusterroles|storageclasses'
-sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup describe <name> --details \
+```
+
+```bash
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+  velero backup describe "$VERIFY_BACKUP" --details \
   | grep -E 'argocd/'
 ```
 
@@ -1224,24 +1271,57 @@ sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup describe <name> --de
 **Goal:** prove Velero can restore a **ConfigMap**. This does **not** prove PVC/volume data. PVC
 restore is Stage **5.7**. Do not delete a production PVC here.
 
-**Run:**
+Same name rule: pick `PROBE_BACKUP` first, print it, then reuse `"$PROBE_BACKUP"`. Never type
+`<probe-backup>`.
+
+**Run 1 — scratch namespace + ConfigMap:**
 
 ```bash
 sudo k3s kubectl create namespace restore-probe
 sudo k3s kubectl -n restore-probe create configmap probe --from-literal=k=v
-sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup create probe-$(date +%s) \
-  --include-namespaces restore-probe --wait
+```
+
+**Run 2 — pick the probe backup name:**
+
+```bash
+PROBE_BACKUP=probe-$(date +%s)
+echo "PROBE_BACKUP=$PROBE_BACKUP"
+```
+
+**Run 3 — back it up:**
+
+```bash
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+  velero backup create "$PROBE_BACKUP" --include-namespaces restore-probe --wait
+```
+
+```bash
 sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup get
+```
 
+**Run 4 — delete the namespace, then restore from that same name:**
+
+```bash
 sudo k3s kubectl delete namespace restore-probe
-sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero restore create \
-  --from-backup <probe-backup> --include-namespaces restore-probe --wait
-sudo k3s kubectl -n restore-probe get configmap probe -o jsonpath='{.data.k}{"\n"}'
+```
 
+```bash
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+  velero restore create --from-backup "$PROBE_BACKUP" \
+  --include-namespaces restore-probe --wait
+```
+
+```bash
+sudo k3s kubectl -n restore-probe get configmap probe -o jsonpath='{.data.k}{"\n"}'
+```
+
+```bash
 sudo k3s kubectl delete namespace restore-probe
 ```
 
 **Expected:** ConfigMap value `v`. **Pass → Stage 5 now.** Set a calendar reminder for 4.6 in 8 days.
+
+**If fail:** STOP.
 
 **If fail:** STOP.
 
@@ -1302,10 +1382,20 @@ dead — which is the exact failure the alert exists to catch. Route both to som
 actually reads, and record which channel and who receives it under *Alerting, and where the
 heartbeat reports to* in [ISSUES-TRACKER](ISSUES-TRACKER.md).
 
+After you create the two checks, **write the two ping URLs down**. They are used in 5.2 and 5.3.
+They are not backup names.
+
 ### 5.2 — Wire Job 1's heartbeat `[node]`
 
+Paste the Job 1 ping URL from 5.1 — do not leave the angle brackets.
+
 ```bash
-sudo sed -i 's|^HEARTBEAT_URL=.*|HEARTBEAT_URL=https://<job-1-check-url>|' /etc/k3s-backup/backup.env
+JOB1_HEARTBEAT_URL='https://paste-the-job-1-ping-url-from-5.1'
+echo "JOB1_HEARTBEAT_URL=$JOB1_HEARTBEAT_URL"
+sudo sed -i "s|^HEARTBEAT_URL=.*|HEARTBEAT_URL=${JOB1_HEARTBEAT_URL}|" /etc/k3s-backup/backup.env
+```
+
+```bash
 sudo systemctl start k3s-backup.service
 sudo journalctl -u k3s-backup.service -n 20 --no-pager | grep -i heartbeat
 ```
@@ -1320,33 +1410,45 @@ This is alerts 2 and 3 in one script. It selects the newest `daily` or `weekly` 
 requires it to be fresh, `Completed`, backed by enough completed `PodVolumeBackups`, and **not a
 backup it has already reported** — then pings the second dead-man URL.
 
+`MIN_EXPECTED_PVBS` is the integer from 4.3 Run 5 (`wc -l`). `VELERO_HEARTBEAT_URL` is the second
+ping URL from 5.1. Replace both before `tee`.
+
 ```bash
 # [local]
 scp scripts/velero/check-last-backup.sh \
   scripts/systemd/velero-backup-check.service \
   scripts/systemd/velero-backup-check.timer <user>@45.90.98.51:/tmp/
+```
 
+```bash
 # [node]
 sudo install -m 0750 /tmp/check-last-backup.sh /usr/local/sbin/check-last-velero-backup.sh
 sudo install -m 0644 /tmp/velero-backup-check.service \
   /tmp/velero-backup-check.timer /etc/systemd/system/
 sudo install -m 0600 /dev/null /etc/k3s-backup/velero-monitor.env
+```
+
+```bash
+VELERO_HEARTBEAT_URL='https://paste-the-velero-ping-url-from-5.1'
+MIN_EXPECTED_PVBS=PASTE_THE_INTEGER_FROM_4.3
+echo "VELERO_HEARTBEAT_URL=$VELERO_HEARTBEAT_URL"
+echo "MIN_EXPECTED_PVBS=$MIN_EXPECTED_PVBS"
 sudo tee /etc/k3s-backup/velero-monitor.env >/dev/null <<EOF
-VELERO_HEARTBEAT_URL=https://<velero-check-url>
-MIN_EXPECTED_PVBS=<count-from-4.3>
+VELERO_HEARTBEAT_URL=${VELERO_HEARTBEAT_URL}
+MIN_EXPECTED_PVBS=${MIN_EXPECTED_PVBS}
 MAX_AGE_HOURS=30
 EOF
+```
+
+```bash
 sudo systemctl daemon-reload
 sudo systemctl enable --now velero-backup-check.timer
 sudo systemctl start velero-backup-check.service
 sudo journalctl -u velero-backup-check.service -n 20 --no-pager
 ```
 
-**Check:** the log ends with `verified and reported <backup-name>`, the external check goes green,
-and `systemctl list-timers 'velero-backup-check*'` shows the next run at 06:30 UTC.
-
-`MIN_EXPECTED_PVBS` is the integer `wc -l` printed in 4.3 — the successful PodVolumeBackup count,
-not the PVC count. Change it when mounted-volume topology changes.
+**Expected:** log ends with `verified and reported` plus the backup NAME column (same style as 4.3).
+External check goes green. `systemctl list-timers 'velero-backup-check*'` shows next run ~06:30 UTC.
 
 The verifier records the UID of the backup it last reported in
 `/var/lib/k3s-backup/velero-last-reported` and refuses to ping twice for the same one, so a skipped
