@@ -138,6 +138,13 @@ and `cred` subfolders (some earlier notes forgot these two). See
 no grace period, no orphan, nothing to recover from. **Velero is the only thing standing between an
 accidental `kubectl delete pvc` and permanent loss**, which is why phase 3 is not optional.
 
+On the node, Velero is a **client**: it does not magically find K3s. It uses
+`/etc/rancher/k3s/k3s.yaml` (`server: https://127.0.0.1:6443`) via
+`sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero …`. `velero backup get` lists backups;
+`Completed` is not proof that PVC data was copied. Beginner walkthrough (what the kubeconfig is,
+what each `get` column means): [07 — Stage 4](docs/07-setup.md#velero-for-someone-new-to-it).
+Hands-on steps stay in that same file — do not skip safety checks.
+
 ## Ground rules for this repo
 
 - **Never keep this documentation only on the server.** If the server dies, we'd lose the very

@@ -1016,6 +1016,108 @@ before the 03:30 UTC Velero window. The script also takes a lock, so two Job 1 r
 Job 1 cannot restore a deleted PVC or Secret. Do **all of Stage 4 on the node**. After **4.5**, go
 straight to Stage 5. **4.6 waits 8 days** — set a reminder; do not block.
 
+### Velero for someone new to it
+
+Velero is a program **inside the cluster** that snapshots Kubernetes objects and (with the
+node-agent) PVC files. The `velero` command on the node is only a **client**. It must talk to the
+K3s API the same way `kubectl` does.
+
+**What `/etc/rancher/k3s/k3s.yaml` is.** It is the cluster admin kubeconfig. Do **not** `cat` it
+into chat. It holds:
+
+```text
+/etc/rancher/k3s/k3s.yaml
+       |
+       +--> K3s API address
+       +--> cluster CA certificate
+       +--> client certificate
+       +--> client private key
+       +--> context / user
+```
+
+The line that matters for this node:
+
+```text
+server: https://127.0.0.1:6443
+```
+
+That means: this file points at the API **on this same machine**, port 6443.
+
+```text
+velero / kubectl
+       |
+       | HTTPS :6443  + certs from k3s.yaml
+       v
+K3s API server
+```
+
+`sudo k3s kubectl` already knows that path. Standalone tools (`velero`, `helm`, plain `kubectl`)
+do **not**. So every Velero command in this stage passes it explicitly:
+
+```text
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero …
+```
+
+`export KUBECONFIG=…` would do the same for **this shell only** — it dies when you disconnect. That
+is why the commands below embed `KUBECONFIG=` instead of asking you to remember an export. Never
+`sudo -E` (golden rule 2).
+
+**What `velero backup get` means.** “List every Velero backup this cluster knows about, and its
+status.” It is a directory, not a restore. One row = one backup. Example:
+
+```text
+NAME                   STATUS      ERRORS  WARNINGS  CREATED                         EXPIRES  STORAGE LOCATION
+daily-20260916095129   Completed   0       24        2026-09-16 09:51:30 +0000 UTC   6d       default
+probe-1789552392       Completed   0       0         2026-09-16 09:54:38 +0000 UTC   29d      default
+verify-1789486389      Completed   0       9         2026-09-15 15:33:09 +0000 UTC   29d      default
+```
+
+| Column | Meaning |
+|--------|---------|
+| **NAME** | Backup id. You chose `verify-…` / `probe-…` in 4.3/4.5. `daily-…` comes from the schedule. |
+| **STATUS** | `Completed` / `Failed` / `InProgress`. `Completed` is **not** proof volumes were copied — 4.3 checks that. |
+| **ERRORS** | Hard failures. Non-zero → read `velero backup describe NAME --details`. |
+| **WARNINGS** | Soft issues. Backup can still be `Completed` (your `daily-` row has 24). |
+| **CREATED** | When Velero created it (UTC). |
+| **EXPIRES** | TTL left. Daily ~7d; a one-off verify/probe ~29d. After this Velero deletes it. |
+| **STORAGE LOCATION** | S3 target name. Ours is `default` → bucket `k3-master-dr-sep-07` prefix `velero/`. |
+| **QUEUE POSITION** | Empty unless a backup is waiting in a queue. |
+| **SELECTOR** | Label filter, if any. `<none>` = whole selected scope. |
+
+To inspect **one** row (replace the name with a NAME from `get` — or `"$VERIFY_BACKUP"` if you set it):
+
+```bash
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
+  velero backup describe "$VERIFY_BACKUP" --details
+```
+
+**What `velero backup-location get` means.** “Where do backups go in S3, and can Velero still write
+there?” This is the **Backup Storage Location** (BSL). `velero backup get`’s STORAGE LOCATION
+column (`default`) is this object’s NAME.
+
+```bash
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup-location get
+```
+
+**Expected on this node (this is a pass):**
+
+```text
+NAME      PROVIDER   BUCKET/PREFIX                PHASE       LAST VALIDATED                  ACCESS MODE   DEFAULT
+default   aws        k3-master-dr-sep-07/velero   Available   2026-09-16 11:17:20 +0000 UTC   ReadWrite     true
+```
+
+| Column | Meaning |
+|--------|---------|
+| **NAME** | Location id. Ours is `default`. |
+| **PROVIDER** | `aws` — S3-compatible plugin. |
+| **BUCKET/PREFIX** | `k3-master-dr-sep-07/velero` — Job 2 prefix only. Job 1 uses `k3s/` in the same bucket. |
+| **PHASE** | Must be **`Available`**. Anything else → STOP (wrong bucket, region, or Velero key). |
+| **LAST VALIDATED** | Last time Velero successfully talked to S3. |
+| **ACCESS MODE** | `ReadWrite` = can create backups. Restore-time we may set `ReadOnly` so a half-restored cluster cannot overwrite S3. |
+| **DEFAULT** | `true` = backups without a location go here. |
+
+Same object via kubectl: `sudo k3s kubectl -n velero get backupstoragelocation`.
+
 Conventions (golden rule 2):
 
 ```text
@@ -1173,14 +1275,24 @@ Secret.
 
 ```bash
 sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero version
+```
+
+```bash
 sudo k3s kubectl -n velero get pods -o wide
-sudo k3s kubectl -n velero get backupstoragelocation
+```
+
+```bash
+sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup-location get
+```
+
+```bash
 sudo k3s kubectl -n velero get schedules
 ```
 
-**Expected:** server `v1.18.0`, pods `Running`, BSL `Available`, schedules `Enabled`. Then 4.3.
+**Expected:** server `v1.18.0`; pods `Running`; backup-location `default` / `k3-master-dr-sep-07/velero` / **PHASE `Available`** / `ReadWrite`; schedules `Enabled`. Column meanings:
+[backup-location get](#velero-for-someone-new-to-it). Then 4.3.
 
-**If fail:** BSL not `Available` → bucket/region/key in 4.2.4.
+**If fail:** PHASE not `Available` → bucket/region/key in 4.2.4.
 
 ### 4.3 — Prove the node-agent actually reads the volumes
 
@@ -1209,11 +1321,15 @@ sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml \
 
 **Expected:** phase `Completed`.
 
-**Run 3 — list names (confirm the NAME column matches `$VERIFY_BACKUP`):**
+**Run 3 — list backups (confirm the NAME column matches `$VERIFY_BACKUP`):**
 
 ```bash
 sudo env KUBECONFIG=/etc/rancher/k3s/k3s.yaml velero backup get
 ```
+
+**Expected:** a table. Your `$VERIFY_BACKUP` row is `Completed`. Column meanings are in
+[Velero for someone new to it](#velero-for-someone-new-to-it) above. `WARNINGS` can be non-zero
+while `STATUS` is still `Completed`.
 
 **Run 4 — describe that same name:**
 
