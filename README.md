@@ -18,8 +18,10 @@ from Git).
 ## Before you run anything
 
 ```bash
-sudo /usr/local/sbin/k3s-backup-preflight.sh --no-aws   # before the bucket exists
-sudo /usr/local/sbin/k3s-backup-preflight.sh            # after Job 1's credential is in place
+sudo bash -n /usr/local/sbin/k3s-backup-preflight.sh && echo "syntax OK"
+sudo /usr/local/sbin/k3s-backup-preflight.sh --no-aws     # first safe local check
+# sudo /usr/local/sbin/k3s-backup-preflight.sh --no-upload  # AWS verify, no S3 test upload
+sudo /usr/local/sbin/k3s-backup-preflight.sh              # full preflight (after Job 1 key exists)
 ```
 
 [`scripts/k3s-backup-preflight.sh`](scripts/k3s-backup-preflight.sh) checks everything the backup
@@ -30,7 +32,19 @@ It covers: required tools · the config file and its permissions · whether the 
 write, and confirms it **can't** read or delete backups · every file the backup reads · a
 namespace-by-namespace inventory · and a plain list of what today's backup does **not** recover.
 
-Exit `0` = ready, `2` = ready with warnings, `1` = don't run the backup yet.
+| Flag | Purpose |
+|------|---------|
+| `--no-aws` | First safe local check |
+| `--no-upload` | AWS verify, no S3 test upload |
+| *(none)* | Full preflight |
+
+Exit `0` = ready. Exit `2` = ready **with warnings only** (safe to back up). systemd/CI treat any
+non-zero as failure — special-case `2` if you automate this. Exit `1` = don't run the backup.
+On the full run, AWS **Denied** on GetObject, DeleteObject, and `velero/*` is a **PASS** (Job 1
+must not read/delete or touch Velero's prefix).
+
+`backup.env` is **Job 1 only**. The Velero Kubernetes Secret is **Job 2 only**. Never mix them.
+Steps: [07 §1.1](docs/07-setup.md#11--run-the-preflight-checker-node).
 
 ## The whole design, in one table
 

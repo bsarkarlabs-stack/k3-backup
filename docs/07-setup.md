@@ -166,8 +166,9 @@ about 30 seconds.
 **First, get the script onto the server.** Pick whichever matches how you have the repo:
 
 ```bash
-# If you cloned this repo onto k3-master already, it's the file in the clone:
-#   ~/poc-k3-backup/k3s-backup-preflight.sh   (adjust to your clone path)
+# If you cloned this repo onto the node already:
+#   ~/poc-k3-backup/scripts/k3s-backup-preflight.sh
+#   (older clone may be ~/poc-k3-backup/k3s-backup-preflight.sh)
 
 # If the repo is only on your laptop, copy it over from [local]:
 scp scripts/k3s-backup-preflight.sh <user>@45.90.98.51:/tmp/
@@ -179,9 +180,29 @@ about where it lands:
 
 ```bash
 sudo install -m 0750 -o root -g root \
-  ~/poc-k3-backup/k3s-backup-preflight.sh \
+  ~/poc-k3-backup/scripts/k3s-backup-preflight.sh \
   /usr/local/sbin/k3s-backup-preflight.sh
 ```
+
+If this node's clone has the script at `~/poc-k3-backup/k3s-backup-preflight.sh` (no `scripts/`),
+use that path instead. This GitHub tree uses `scripts/k3s-backup-preflight.sh`.
+
+**Before any preflight run — syntax only (changes nothing):**
+
+```bash
+sudo bash -n /usr/local/sbin/k3s-backup-preflight.sh && echo "syntax OK"
+```
+
+**Expected:** `syntax OK`. **If fail:** STOP — do not run the checker; re-copy the script from the repo.
+
+**Three modes.** Pick one. Stage 1.1 uses `--no-aws`. Stage 3.3 uses no flag (full). `--no-upload` is
+the middle path: AWS identity and listing, **no** `_preflight/` test object.
+
+| Command | Purpose |
+|---------|---------|
+| `sudo /usr/local/sbin/k3s-backup-preflight.sh --no-aws` | First **safe local** check. No AWS. Use before the bucket exists. |
+| `sudo /usr/local/sbin/k3s-backup-preflight.sh --no-upload` | AWS verify (identity, list `k3s/`). **No** S3 test upload. |
+| `sudo /usr/local/sbin/k3s-backup-preflight.sh` | **Full** preflight, including a tiny `_preflight/` upload and the Denied-is-PASS guardrails. |
 
 **Then run it.** Use `--no-aws` this first time — the bucket doesn't exist yet, and this tells you
 what's missing locally so you aren't creating AWS resources only to find the server can't use them.
@@ -198,15 +219,24 @@ echo "Exit code: ${PIPESTATUS[0]}"
 
 `2>&1` folds warnings and errors into the same log so nothing is lost, and the `Exit code:` line is
 the number the table below reads — not `tee`'s. Read the saved log back with `cat
-~/k3s-preflight-*.log`, and send that file if you want someone else to check it. (If you just want a
-quick look with no log, `sudo /usr/local/sbin/k3s-backup-preflight.sh --no-aws` on its own works
-too.)
+~/k3s-preflight-*.log`.
 
-| Exit | Meaning |
-|------|---------|
-| `0` — READY | Everything checks out |
-| `2` — READY, with warnings | Safe to proceed, but read them — some mean a future failure would go unnoticed |
-| `1` — NOT READY | Blocking problems. Every failure prints the exact command to fix it |
+| Exit | Script meaning | Automation / systemd / CI |
+|------|----------------|---------------------------|
+| `0` | READY — all checks passed | Treat as success |
+| `2` | READY, **warnings only** — safe to run Job 1. Read the warnings (empty `HEARTBEAT_URL` is the usual one) | **Not a failure in this script.** `systemd` and most CI treat any non-zero as failed. If you later wrap preflight in a timer or pipeline, special-case `2` (`\|\| [ $? -eq 2 ]`) or you will page on warnings |
+| `1` | NOT READY — blocking problems. Each FAIL prints the fix command | Treat as failure. Do not run the backup |
+
+**Denied = PASS (full preflight / section C only).** Job 1's key is **write-only** on `k3s/` and
+must not touch `velero/`. AWS `AccessDenied` / `Denied` on these is the **correct** result:
+
+| What preflight tries | If AWS denies it | If it succeeds |
+|----------------------|------------------|----------------|
+| `GetObject` (read back the probe) | **PASS** — compromised node cannot download the cluster CA from S3 | WARN — Job 1 policy is too wide |
+| `DeleteObject` | **PASS** — Job 1 cannot destroy backups | WARN — remove `s3:DeleteObject` |
+| Write to `velero/*` | **PASS** — Job 1 and Velero keys are separated | WARN — Job 1 can see Velero's Kopia repo |
+
+Do **not** “fix” those denials by widening the IAM policy. That would be a FAIL of the design.
 
 ### 1.2 — Confirm the baseline still holds `[node]`
 
@@ -366,7 +396,21 @@ Git. There are **four** places things live, and each one holds different things.
                                  |                         |
                                  v                         v
                         /etc/k3s-backup/backup.env   Kubernetes Secret
-                        on k3-master                 in the velero namespace
+                        on k3-master                 in namespace velero
+                             |                              |
+                             v                              v
+                        Job 1 only                     Job 2 only
+                     (k3s/ prefix)                  (velero/ prefix)
+```
+
+```text
+backup.env
+   → Job 1 only     (k3-master-backup-writer)
+   → never the Velero key
+
+Velero Kubernetes Secret
+   → Job 2 only     (created by install-velero.sh, namespace velero)
+   → never in backup.env
 ```
 
 | Where | What lives there | Permanent? |
@@ -764,13 +808,22 @@ sudo bash -n /usr/local/sbin/k3s-server-backup.sh && echo "syntax OK"
 
 ### 3.3 — Re-run the preflight, this time with AWS `[node]`
 
+Syntax check first (same as 1.1):
+
+```bash
+sudo bash -n /usr/local/sbin/k3s-backup-preflight.sh && echo "syntax OK"
+```
+
+Full preflight (test upload + Denied-is-PASS guardrails). `--no-upload` if you only want listing,
+no `_preflight/` object:
+
 ```bash
 sudo /usr/local/sbin/k3s-backup-preflight.sh
 ```
 
-**Check:** exit `0` or `2`. Section C should now show uploads working, listing working, and — this
-is the part worth reading — **reading back and deleting correctly refused**. If either of those
-guardrails reports the credential *can* read or delete, go back to 2.5.
+**Expected:** exit `0` or `2` (`2` = warnings only — see 1.1; do not treat it as systemd failure).
+Section C: upload/list work, and **GetObject, DeleteObject, and write to `velero/*` are Denied →
+PASS**. If any of those three **succeeds**, go back to 2.5 — the Job 1 policy is too wide.
 
 ### 3.4 — Write down the current state, so you can prove nothing changed `[node]`
 
