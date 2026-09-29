@@ -25,7 +25,7 @@ Four flows. You almost always want the second one.
 
 | You need | Details |
 |----------|---------|
-| An AWS login that can read the bucket | Your normal admin or SSO login. There is deliberately no separate stored restore key — [02 §3](02-backup-strategy.md#two-workload-credentials-separated-by-failure-domain) |
+| An AWS login that can read the bucket | The laptop admin profile `k3-backup-admin`, configured on the host that runs the download. There is deliberately no separate stored restore key — [02 §3](02-backup-strategy.md#two-workload-credentials-separated-by-failure-domain). How to put that profile on the host is [§A step 1](#step-1--pick-a-backup-and-read-its-manifest) |
 | The bucket name and region | `k3-master-dr-sep-07`, `us-east-1` — written down outside AWS as well |
 | A replacement server | 8 cores, 22 GB RAM, ≥97 GB disk, x86_64, Ubuntu 24.04 LTS |
 | The K3s version | **Don't guess — read it out of `MANIFEST.json`.** |
@@ -43,6 +43,43 @@ Don't mistake these for restore failures: `demo-app` (not synced), `nginx-app` (
 ## A — Full server rebuild
 
 ### Step 1 — Pick a backup and read its manifest
+
+Download with the admin profile `k3-backup-admin` from [07](07-setup.md) — the same key that
+created the bucket. The host you are restoring onto does not have that login until you configure
+it here. `/etc/k3s-backup/backup.env` is `k3-master-backup-writer`: it can upload and list
+`k3s/*`, and `s3:GetObject` on that prefix is denied, so `aws s3 cp` returns `403 Forbidden`.
+`k3-master-velero` can read only `velero/*`. Sourcing `backup.env` also exports
+`AWS_ACCESS_KEY_ID`, which overrides any profile set afterwards. A fresh `ubuntu` shell on the
+same host has no credentials (`Unable to locate credentials`) until this profile exists.
+
+On the host where the files should land, in a shell that has not sourced `backup.env`:
+
+```bash
+aws configure --profile k3-backup-admin
+```
+
+It asks for four values. Use the admin pair from the laptop's `k3-backup-admin` profile, not
+either workload key:
+
+```text
+AWS Access Key ID [None]:      <admin access key id>
+AWS Secret Access Key [None]:  <admin secret access key>
+Default region name [None]:    us-east-1
+Default output format [None]:  json
+```
+
+That key stays in this profile only. It never goes into `/etc/k3s-backup/backup.env`.
+
+```bash
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+export AWS_PROFILE=k3-backup-admin
+aws sts get-caller-identity
+```
+
+The ARN has to be the admin user. `k3-master-backup-writer` or `k3-master-velero` cannot download
+`k3s/*` — stop and fix the profile before continuing. Leave the profile in place until every
+`aws s3 cp` in this runbook has finished, including the vaulted `k3s` binary in step 3. Then
+delete the `[k3-backup-admin]` section from `~/.aws/credentials` on this host.
 
 Each successful run has a unique UTC prefix. `COMPLETE.json` is uploaded last; ignore every prefix
 without it, because it may be a partial upload.
@@ -574,11 +611,14 @@ but is **not** this. This needs a machine that boots.
    production host.
 2. **Prove the archive is readable**, before trusting anything downstream of it. This is the check
    [07 stage 3.7](07-setup.md#37--verify-the-archive-off-the-server-local) does once at setup; doing
-   it here is what makes it recur:
+   it here is what makes it recur. Configure `k3-backup-admin` on this VM first, as in
+   [§A step 1](#step-1--pick-a-backup-and-read-its-manifest). `backup.env` on the VM cannot read
+   `k3s/*`.
 
    ```bash
    # PREFIX and ARCHIVE come from §A step 1 (newest COMPLETE.json, then the
-   # filename recorded in MANIFEST.json).
+   # filename recorded in MANIFEST.json). The shell must already have
+   # AWS_PROFILE=k3-backup-admin, and sts get-caller-identity must be the admin user.
    aws s3 cp "s3://$BUCKET/$PREFIX/" . --recursive
    # verify the COMPLETE.json -> MANIFEST.json -> archive chain, as in §A step 1
    ARCHIVE=$(python3 -c 'import json;print(json.load(open("MANIFEST.json"))["archive"]["filename"])')
