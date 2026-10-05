@@ -26,10 +26,12 @@ spec:
     # namespace must never be able to appear without being backed up.
     includeClusterResources: true
 
-    # local-path has no volume snapshot support and a Delete reclaim policy,
-    # so file-system backup through the node-agent is the only method that
-    # works. Opt-out per pod if something ever needs excluding — never
-    # opt-in, or a new PVC ships silently unprotected.
+    # Snapshots are off. The installer accepts mounted hostPath and local
+    # PVs only, and this schedule copies those through the node-agent.
+    # That is the method this cluster uses. Other methods exist (volume
+    # snapshots, CSI snapshots, application dumps); they are not configured
+    # here. Opt out per pod if something must be excluded — never opt in,
+    # or a new PVC ships silently unprotected.
     defaultVolumesToFsBackup: true
 
     # There are no CSI snapshots on this cluster; asking for them only
